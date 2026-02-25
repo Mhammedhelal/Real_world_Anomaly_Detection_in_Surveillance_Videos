@@ -1,0 +1,81 @@
+# Configuration for Real-world Anomaly Detection in Surveillance Videos
+# Extracted from notebooks:
+#   - extractoin_normal_one_Feb_15.ipynb
+#   - AnomalyDetector_helal_Feb_23.ipynb
+
+# Dataset Configuration
+dataset:
+  input_video_dir: 'data/videos/normal'
+  output_base_dir: 'data/features'
+  features_dir_name: 'extracted'
+  
+  # Frame processing
+  frame_size: [224, 224]
+  segment_length: 16
+  fps: 30
+  max_frames: 3000
+  
+  # Video file extensions
+  video_extensions: ['.avi', '.mp4', '.mov', '.mkv', '.flv', '.wmv']
+
+# Feature Extraction Configuration
+feature_extraction:
+  motion_extractor: 'i3d'
+  target_fps: 8
+  
+  # I3D specific
+  i3d_pretrained: true
+  i3d_frozen: true
+  i3d_feature_dim: 2048
+  
+  # YOLO specific
+  yolo_model_name: 'yolov8n.pt'
+  yolo_feature_dim: 83
+  
+  # Feature normalization
+  normalize: true
+  normalize_mean: [0.485, 0.456, 0.406]
+  normalize_std: [0.229, 0.224, 0.225]
+
+# Model Architecture Configuration
+model:
+  input_size: 2131
+  hidden_size: 256
+  num_classes: 14
+  bidirectional: true
+
+# Training Configuration
+training:
+  batch_size: 32
+  num_epochs: 100
+  learning_rate: 1.0
+  rho: 0.9
+  eps: 1e-6
+  shuffle: true
+  num_workers: 4
+  pin_memory: true
+  
+# Loss Function Configuration
+loss:
+  lambda_smoothness: 8e-5
+  lambda_sparsity: 8e-5
+  margin: 1.0
+  
+# Hardware Configuration
+hardware:
+  device: 'cuda'
+  mixed_precision: false
+  
+# Logging Configuration
+logging:
+  log_interval: 10
+  save_interval: 50
+  checkpoint_dir: 'outputs/checkpoints'
+  log_dir: 'outputs/logs'
+  
+# Optimizer Configuration
+optimizer:
+  type: 'adadelta'
+  learning_rate: 1.0
+  rho: 0.9
+  eps: 1e-6
