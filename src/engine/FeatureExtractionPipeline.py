@@ -6,15 +6,18 @@ From: extractoin_normal_one_Feb_15.ipynb
 
 import os
 import json
+from pathlib import Path
+import sys
 import time
 import torch
 import numpy as np
 from datetime import datetime
 from tqdm import tqdm
 
-from ..data.transforms import VideoPreprocessor
-from ..data.labels import CustomDatasetMetadata
-from ..config import get_config
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from data.transforms import VideoPreprocessor
+from data.labels import CustomDatasetMetadata
+from config import Config
 
 
 class FeatureExtractionPipeline:
@@ -28,7 +31,7 @@ class FeatureExtractionPipeline:
         self.feature_extractor = feature_extractor
 
         # Get config for preprocessing settings
-        config = get_config()
+        config = Config.from_yaml('configs/default.yaml')
         self.preprocessor = VideoPreprocessor(
             frame_size=config['dataset']['frame_size'],
             max_frames=config['dataset']['max_frames']
@@ -67,7 +70,7 @@ class FeatureExtractionPipeline:
     # ----------------------------
     def _save_features(self, features, video_info, split):
         """Save extracted features to NPZ file"""
-        config = get_config()
+        config = Config.from_yaml('configs/default.yaml')
         video_name = os.path.splitext(video_info['filename'])[0]
         filename = f"{split}_{video_name}.npz"
         filepath = os.path.join(self.features_dir, filename)
@@ -121,7 +124,7 @@ class FeatureExtractionPipeline:
         print(f"{'='*60}")
 
         try:
-            config = get_config()
+            config = Config.from_yaml('configs/default.yaml')
             
             # Step 1: Read video
             frames, fps, video_metadata = self.preprocessor.read_video(

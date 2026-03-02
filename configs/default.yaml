@@ -10,7 +10,7 @@ dataset:
   features_dir_name: 'extracted'
   
   # Frame processing
-  frame_size: [224, 224]
+  frame_size: (224, 224)
   segment_length: 16
   fps: 30
   max_frames: 3000
