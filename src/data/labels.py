@@ -1,13 +1,19 @@
 """
 Label definitions for the UCF-Crime dataset.
 
-This module contains only the taxonomy dictionary and helper functions to
-map between numeric labels and human-readable class names. It intentionally
-avoids any filesystem or OpenCV dependencies.
+This module exposes helper functions for working with the label taxonomy.
+The actual mapping is read from configuration at import time, which allows
+users to override or extend the categories by editing
+`configs/default.yaml` or supplying an alternate config file.
 """
 
-# UCF-Crime Dataset Categories
-UCF_CRIME_CATEGORIES = {
+from config import Config
+
+# load configuration once
+_cfg = Config.from_yaml('configs/default.yaml')
+
+# fallback hard-coded map in case config is missing section
+_DEFAULT_UCF_CATEGORIES = {
     0: 'Normal',
     1: 'Abuse',
     2: 'Arrest',
@@ -23,6 +29,13 @@ UCF_CRIME_CATEGORIES = {
     12: 'Vandalism',
     13: 'RoadAccidents'
 }
+
+_raw_categories = _cfg.get('labels', {}).get('ucf_crime_categories', _DEFAULT_UCF_CATEGORIES)
+# convert from Namespace to plain dict if necessary
+if hasattr(_raw_categories, 'to_dict'):
+    UCF_CRIME_CATEGORIES = _raw_categories.to_dict()
+else:
+    UCF_CRIME_CATEGORIES = _raw_categories
 
 
 def get_class_name(label):

@@ -79,3 +79,21 @@ optimizer:
   learning_rate: 1.0
   rho: 0.9
   eps: 1e-6
+
+# Label taxonomy for UCF-Crime dataset (can be overridden by user)
+labels:
+  ucf_crime_categories:
+    0: 'Normal'
+    1: 'Abuse'
+    2: 'Arrest'
+    3: 'Arson'
+    4: 'Assault'
+    5: 'Burglary'
+    6: 'Explosion'
+    7: 'Fighting'
+    8: 'Robbery'
+    9: 'Shooting'
+    10: 'Shoplifting'
+    11: 'Stealing'
+    12: 'Vandalism'
+    13: 'RoadAccidents'
