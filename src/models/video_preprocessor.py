@@ -13,8 +13,8 @@ import torch
 from PIL import Image
 from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from src.data.transforms import Transform
-from src.config import Config
+from data.transforms import Transform
+from config import Config
 
 
 cfg = Config.from_yaml('configs/default.yaml')
