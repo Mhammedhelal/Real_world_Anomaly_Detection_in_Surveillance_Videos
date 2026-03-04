@@ -10,14 +10,11 @@ from . import models
 from . import data
 from . import engine
 from . import utils
-from .config import get_config, load_config, set_config
+# the configuration class lives in src.config; users can import it directly
 
 __all__ = [
     'models',
     'data',
     'engine',
     'utils',
-    'get_config',
-    'load_config',
-    'set_config',
 ]
