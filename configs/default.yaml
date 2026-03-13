@@ -8,6 +8,8 @@ dataset:
   input_video_dir: 'data/videos/normal'
   output_base_dir: 'data/features'
   features_dir_name: 'extracted'
+  collate_type: 'variable_length'
+  collate_fixed_length: 128
   
   # Frame processing
   frame_size: (224, 224)
