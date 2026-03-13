@@ -12,72 +12,61 @@ from pathlib import Path
 
 
 
-class VideoDataset(Dataset):
+# ════════════════════════════════════════════════════════════════════════════
+# Dataset
+# ════════════════════════════════════════════════════════════════════════════
+
+class VideoFeatureDataset(Dataset):
     """
-    Custom Dataset for handling pre-extracted video features.
-    Note: Videos may have different numbers of segments.
-    
-    Args:
-        features: List of feature tensors [Segments, 2131]
-        labels: List of labels for each video
+    Loads pre-extracted .npz feature files produced by extract_features.py.
+
+    Each .npz file must contain:
+        - 'features'  : np.ndarray  [num_segments, feature_dim]
+        - 'metadata'  : dict-like   with key 'label' (int, 0 = normal)
     """
-    def __init__(self, features: List[torch.Tensor], labels: List[int]):
-        self.features = features
-        self.labels = labels
-    
+
+    def __init__(self, features_dir: str, split: str = "train"):
+        """
+        Args:
+            features_dir: Root features directory (contains subfolders).
+            split: 'train' or 'test' — files whose names start with this prefix.
+        """
+        self.samples = []   # list of (features_tensor, label)
+        self.filenames = []
+
+        # Walk all subfolders looking for .npz files matching the split
+        for root, _, files in os.walk(features_dir):
+            for fname in sorted(files):
+                if not fname.endswith(".npz"):
+                    continue
+                if not fname.startswith(split + "_"):
+                    continue
+
+                path = os.path.join(root, fname)
+                try:
+                    data = np.load(path, allow_pickle=True)
+                    features = data["features"].astype(np.float32)    # [S, D]
+                    metadata = data["metadata"].item()
+                    label = int(metadata["label"])
+
+                    self.samples.append((torch.from_numpy(features), label))
+                    self.filenames.append(fname)
+                except Exception as e:
+                    print(f"⚠️  Skipping {fname}: {e}")
+
+        print(f"📦 Loaded {len(self.samples)} '{split}' feature files from {features_dir}")
+
     def __len__(self):
-        return len(self.features)
-    
+        return len(self.samples)
+
     def __getitem__(self, idx):
-        # Returns a tuple: (Tensor[Segments, 2131], Label)
-        return self.features[idx], self.labels[idx]
+        features, label = self.samples[idx]
+        return features, label
 
 
-def collate_fn_variable_length(batch):
-    """
-    Collate function for handling variable sequence lengths in a single batch.
-    Pads sequences to the length of the longest video in the batch.
-    
-    Args:
-        batch: List of (features, label) tuples from VideoDataset
-    
-    Returns:
-        Tuple of (padded_features, labels)
-        - padded_features: [Batch, MaxSegments, 2131]
-        - labels: [Batch]
-    """
+def collate_fn(batch):
+    """Pad variable-length segment sequences to the longest in the batch."""
     features, labels = zip(*batch)
-    # Pads sequences to the length of the longest video in the batch
-    features_padded = torch.nn.utils.rnn.pad_sequence(features, batch_first=True)
+    features_padded = nn.utils.rnn.pad_sequence(features, batch_first=True)
     labels = torch.LongTensor(labels)
     return features_padded, labels
-
-
-def collate_fn_fixed_length(batch, sequence_length=128):
-    """
-    Collate function for fixed-length sequences.
-    Truncates or pads to a fixed length.
-    
-    Args:
-        batch: List of (features, label) tuples
-        sequence_length: Target sequence length
-    
-    Returns:
-        Tuple of (fixed_features, labels)
-    """
-    features, labels = zip(*batch)
-    
-    fixed_features = []
-    for feat in features:
-        if feat.shape[0] > sequence_length:
-            # Truncate
-            fixed_features.append(feat[:sequence_length])
-        else:
-            # Pad
-            padding = sequence_length - feat.shape[0]
-            padded = torch.nn.functional.pad(feat, (0, 0, 0, padding))
-            fixed_features.append(padded)
-    
-    features_stacked = torch.stack(fixed_features)
-    labels = torch.LongTensor(labels)
-    return features_stacked, labels

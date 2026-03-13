@@ -27,9 +27,11 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.models.anomaly_detector import AnomalyDetector
+from src.utils.checkpointing import load_model_from_checkpoint
+from src.utils.metrics import compute_auc
 
-# Reuse the dataset / collate from train.py
-from train import VideoFeatureDataset, collate_fn
+# Reuse the dataset / collate 
+from src.data import VideoFeatureDataset, collate_fn
 
 # UCF-Crime class names
 ANOMALY_CLASSES = [
@@ -39,46 +41,7 @@ ANOMALY_CLASSES = [
 ]
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# Helpers
-# ════════════════════════════════════════════════════════════════════════════
 
-def load_model_from_checkpoint(checkpoint_path: str, device: torch.device) -> AnomalyDetector:
-    """Load AnomalyDetector from a .pt checkpoint saved by train.py."""
-    ckpt = torch.load(checkpoint_path, map_location=device)
-
-    cfg = ckpt.get("config", {})
-    model = AnomalyDetector(
-        input_size=cfg.get("input_size",  2131),
-        hidden_size=cfg.get("hidden_size", 256),
-        num_classes=cfg.get("num_classes", 14),
-    ).to(device)
-
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.eval()
-
-    epoch = ckpt.get("epoch", "?")
-    loss  = ckpt.get("loss",  float("nan"))
-    print(f"✅ Loaded checkpoint: epoch {epoch}, train loss {loss:.4f}")
-    return model
-
-
-def compute_auc(y_true: np.ndarray, y_score: np.ndarray) -> float:
-    """Compute AUC-ROC without sklearn (pure numpy)."""
-    # Sort by score descending
-    desc_idx = np.argsort(y_score)[::-1]
-    y_true_sorted = y_true[desc_idx]
-
-    # Cumulative TP and FP
-    tp = np.cumsum(y_true_sorted)
-    fp = np.cumsum(1 - y_true_sorted)
-
-    tp_rate = tp / (tp[-1] + 1e-12)
-    fp_rate = fp / (fp[-1] + 1e-12)
-
-    # Trapezoidal AUC
-    auc = np.trapz(tp_rate, fp_rate)
-    return float(auc)
 
 
 # ════════════════════════════════════════════════════════════════════════════
