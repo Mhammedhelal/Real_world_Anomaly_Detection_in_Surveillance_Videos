@@ -4,6 +4,8 @@ Dataset classes and data loading utilities.
 Extracted from: AnomalyDetector_helal_Feb_23.ipynb
 """
 
+import os
+
 import torch
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
@@ -67,6 +69,6 @@ class VideoFeatureDataset(Dataset):
 def collate_fn(batch):
     """Pad variable-length segment sequences to the longest in the batch."""
     features, labels = zip(*batch)
-    features_padded = nn.utils.rnn.pad_sequence(features, batch_first=True)
+    features_padded = torch.nn.utils.rnn.pad_sequence(features, batch_first=True)
     labels = torch.LongTensor(labels)
     return features_padded, labels

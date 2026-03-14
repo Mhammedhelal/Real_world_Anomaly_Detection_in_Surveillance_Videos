@@ -16,6 +16,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from models.video_preprocessor import VideoPreprocessor
+from data.transforms import transform
 from data.metadata import DatasetMetadata
 from utils.video import get_video_info
 from config import Config
@@ -35,7 +36,8 @@ class FeatureExtractionPipeline:
         config = Config.from_yaml('configs/default.yaml')
         self.preprocessor = VideoPreprocessor(
             frame_size=config['dataset']['frame_size'],
-            max_frames=config['dataset']['max_frames']
+            max_frames=config['dataset']['max_frames'],
+            transform=transform
         )
 
         # Progress tracking

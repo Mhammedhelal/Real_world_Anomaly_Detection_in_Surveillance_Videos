@@ -13,7 +13,7 @@ import torch
 from PIL import Image
 from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from data.transforms import Transform
+from data.transforms import transform
 from config import Config
 
 
@@ -23,7 +23,7 @@ cfg = Config.from_yaml('configs/default.yaml')
 class VideoPreprocessor:
     """Preprocess video files for feature extraction"""
 
-    def __init__(self, frame_size=cfg.dataset.frame_size, max_frames=3000):
+    def __init__(self, frame_size=cfg.dataset.frame_size, max_frames=3000, transform = transform):
         """
         Initialize video preprocessor.
         
@@ -35,7 +35,7 @@ class VideoPreprocessor:
         self.max_frames = max_frames
 
         # Transformation pipeline (ImageNet normalization)
-        self.transform = Transform.build_transform(frame_size, mean=cfg.dataset.normalize_mean, std=cfg.datset.normalize_std)
+        self.transform = transform
 
     def read_video(self, video_path: str, target_fps: int = 8):
         """
