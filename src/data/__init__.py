@@ -2,14 +2,21 @@
 Data module containing dataset and preprocessing utilities.
 """
 
-from .dataset import VideoDataset, collate_fn_variable_length, collate_fn_fixed_length
+from .dataset import VideoFeatureDataset, collate_fn
 from .labels import UCF_CRIME_CATEGORIES, get_class_name, get_label_from_name
 from .metadata import DatasetMetadata
 
+# Backward compatibility aliases
+VideoDataset = VideoFeatureDataset
+collate_fn_variable_length = collate_fn
+collate_fn_fixed_length = collate_fn
+
 __all__ = [
-    'VideoDataset',
-    'collate_fn_variable_length',
-    'collate_fn_fixed_length',
+    'VideoFeatureDataset',
+    'VideoDataset',  # backward compatibility
+    'collate_fn',
+    'collate_fn_variable_length',  # backward compatibility
+    'collate_fn_fixed_length',  # backward compatibility
     'DatasetMetadata',
     'UCF_CRIME_CATEGORIES',
     'get_class_name',
