@@ -6,9 +6,9 @@ Contains model architectures from the notebooks:
 - Loss Functions: MIL Ranking Loss
 """
 
-from .anomaly_detector import AnomalyDetector
-from .losses import MILRankingLoss
-from .feature_extractors import BaseFeatureExtractor, I3DFeatureExtractor, R3DFeatureExtractor, ResidualBlock3D, LightweightFeatureExtractor,YOLOObjectFeatureExtractor, YOLOFeatureAdapter, FeatureExtractorFactory, TwoStreamFeatureExtractor
+from src.models.anomaly_detector import AnomalyDetector
+from src.models.losses import MILRankingLoss
+from src.models.feature_extractors import BaseFeatureExtractor, I3DFeatureExtractor, R3DFeatureExtractor, ResidualBlock3D, LightweightFeatureExtractor,YOLOObjectFeatureExtractor, YOLOFeatureAdapter, FeatureExtractorFactory, TwoStreamFeatureExtractor
 
 __all__ = [
     'AnomalyDetector',

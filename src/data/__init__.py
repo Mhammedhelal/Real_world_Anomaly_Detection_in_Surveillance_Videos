@@ -2,9 +2,9 @@
 Data module containing dataset and preprocessing utilities.
 """
 
-from .dataset import VideoFeatureDataset, collate_fn
-from .labels import UCF_CRIME_CATEGORIES, get_class_name, get_label_from_name
-from .metadata import DatasetMetadata
+from src.data.dataset import VideoFeatureDataset, collate_fn
+from src.data.labels import UCF_CRIME_CATEGORIES, get_class_name, get_label_from_name
+from src.data.metadata import DatasetMetadata
 
 # Backward compatibility aliases
 VideoDataset = VideoFeatureDataset

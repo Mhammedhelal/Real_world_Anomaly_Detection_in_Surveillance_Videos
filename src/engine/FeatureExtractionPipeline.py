@@ -1,468 +1,377 @@
 """
-Feature extraction pipeline for video processing.
+src/engine/FeatureExtractionPipeline.py
+----------------------------------------
+Feature extraction pipeline — fully decoupled from data source.
 
-From: extractoin_normal_one_Feb_15.ipynb
+Data flow
+---------
+  AbstractFrameSource                (disk OR camera — pipeline doesn't care)
+      ↓  List[np.ndarray]  raw RGB frames
+  VideoPreprocessor.to_segments()
+      ↓  List[Tensor]  normalised, fixed-length clips
+  FusionExtractor.extract()
+      ↓  np.ndarray  [num_segments, feature_dim]
+  Sink (training mode)  →  save .npz to disk
+  Sink (inference mode) →  return features / pass to model
+
+Design
+------
+The pipeline never imports cv2, never opens a file, never constructs a
+VideoCapture.  All of that is hidden behind AbstractFrameSource.
+
+The two concrete flows are:
+
+  Training (offline, batch):
+    DiskVideoSource → FeatureExtractionPipeline → DiskSink (.npz)
+
+  Inference (real-time):
+    CameraStreamSource → FeatureExtractionPipeline → ModelInferenceSink
+
+The pipeline code is identical for both.
 """
 
-import os
+from __future__ import annotations
+
 import json
-from pathlib import Path
-import sys
+import os
 import time
-import torch
-import numpy as np
 from datetime import datetime
-from tqdm import tqdm
+from pathlib import Path
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from models.video_preprocessor import VideoPreprocessor
-from data.transforms import transform
-from data.metadata import DatasetMetadata
-from utils.video import get_video_info
-from config import Config
+import numpy as np
+import torch
 
+from src.data.sources.base import AbstractFrameSource
+from src.data.sources.disk_source import DiskVideoSource
+from src.models.video_preprocessor import VideoPreprocessor
+from src.config import Config
+
+
+# ---------------------------------------------------------------------------
+# FeatureExtractionPipeline
+# ---------------------------------------------------------------------------
 
 class FeatureExtractionPipeline:
-    """Pipeline for extracting and saving features"""
+    """
+    Orchestrates the flow from AbstractFrameSource → features.
 
-    def __init__(self, input_video_dir, features_dir, metadata_dir, feature_extractor, device='cuda'):
-        self.input_video_dir = input_video_dir
-        self.features_dir = features_dir
-        self.metadata_dir = metadata_dir
-        self.device = device
+    The pipeline does NOT know whether the source is a disk directory or
+    a live camera.  It consumes the AbstractFrameSource.stream() iterator
+    and calls the preprocessor and extractor on each batch.
+
+    Parameters
+    ----------
+    source : AbstractFrameSource
+        Any frame source (DiskVideoSource, CameraStreamSource, …).
+    preprocessor : VideoPreprocessor
+        Converts raw RGB frames to normalised segment tensors.
+    feature_extractor : object
+        Must implement extract_features(segments) → np.ndarray.
+        Typically a TwoStreamFeatureExtractor / FusionExtractor.
+    features_dir : str | Path
+        Where to save .npz files (training mode only).
+    metadata_dir : str | Path
+        Where to save extraction progress JSON.
+    device : str
+        'cuda' or 'cpu'.
+    """
+
+    def __init__(
+        self,
+        source: AbstractFrameSource,
+        preprocessor: VideoPreprocessor,
+        feature_extractor,
+        features_dir: str | Path = 'data/features/extracted',
+        metadata_dir: str | Path = 'data/features/metadata',
+        device: str = 'cuda',
+    ) -> None:
+        self.source = source
+        self.preprocessor = preprocessor
         self.feature_extractor = feature_extractor
+        self.features_dir = Path(features_dir)
+        self.metadata_dir = Path(metadata_dir)
+        self.device = device
 
-        # Get config for preprocessing settings
-        config = Config.from_yaml('configs/default.yaml')
-        self.preprocessor = VideoPreprocessor(
-            frame_size=config['dataset']['frame_size'],
-            max_frames=config['dataset']['max_frames'],
-            transform=transform
-        )
+        self.features_dir.mkdir(parents=True, exist_ok=True)
+        self.metadata_dir.mkdir(parents=True, exist_ok=True)
 
-        # Progress tracking
-        self.progress_file = os.path.join(metadata_dir, 'extraction_progress.json')
-        self.progress = self._load_progress()
+        self._progress_file = self.metadata_dir / 'extraction_progress.json'
+        self._progress = self._load_progress()
 
-        # Statistics
-        self.stats = {
+        self._stats: Dict[str, int | float] = {
             'total_videos': 0,
             'successful': 0,
             'failed': 0,
             'total_features': 0,
-            'total_size_mb': 0
+            'total_size_mb': 0.0,
         }
 
-    # ----------------------------
-    # Progress utilities
-    # ----------------------------
-    def _load_progress(self):
-        """Load extraction progress"""
-        if os.path.exists(self.progress_file):
-            with open(self.progress_file, 'r') as f:
+    # ------------------------------------------------------------------
+    # Progress tracking
+    # ------------------------------------------------------------------
+
+    def _load_progress(self) -> dict:
+        if self._progress_file.exists():
+            with open(self._progress_file) as f:
                 return json.load(f)
-        return {'processed': [], 'failed': [], 'start_time': datetime.now().isoformat()}
-
-    def _save_progress(self):
-        """Save extraction progress"""
-        with open(self.progress_file, 'w') as f:
-            json.dump(self.progress, f, indent=2)
-
-    # ----------------------------
-    # Feature saving
-    # ----------------------------
-    def _save_features(self, features, video_info, split):
-        """Save extracted features to NPZ file"""
-        config = Config.from_yaml('configs/default.yaml')
-        video_name = os.path.splitext(video_info['filename'])[0]
-        filename = f"{split}_{video_name}.npz"
-        filepath = os.path.join(self.features_dir, filename)
-
-        metadata = {
-            'video_path': video_info['video_path'],
-            'filename': video_info['filename'],
-            'label': video_info['label'],
-            'class': video_info['class'],
-            'split': split,
-            'motion_extractor': config['feature_extraction']['motion_extractor'],
-            'feature_dim': features.shape[1],
-            'num_segments': features.shape[0],
-            'segment_length': config['dataset']['segment_length'],
-            'extraction_time': datetime.now().isoformat(),
-            'video_info': get_video_info(video_info['full_path']),
-            'dataset_type': 'training_normal_only'
+        return {
+            'processed': [],
+            'failed': [],
+            'start_time': datetime.now().isoformat(),
         }
 
-        np.savez_compressed(
-            filepath,
-            features=features.astype(np.float32),
-            metadata=metadata
-        )
+    def _save_progress(self) -> None:
+        with open(self._progress_file, 'w') as f:
+            json.dump(self._progress, f, indent=2)
 
-        file_size = os.path.getsize(filepath) / (1024 * 1024)  # MB
-        self.stats['total_features'] += 1
-        self.stats['total_size_mb'] += file_size
+    # ------------------------------------------------------------------
+    # Core extraction — source-agnostic
+    # ------------------------------------------------------------------
 
-        print(f"  ✅ Features saved: {filename}")
-        print(f"     Shape: {features.shape[0]} segments × {features.shape[1]} features")
-        print(f"     Size: {file_size:.2f} MB")
+    def extract_from_source(self) -> Iterator[Tuple[np.ndarray, dict]]:
+        """
+        Stream features from whatever source was injected.
 
-        return filepath
+        Yields
+        ------
+        (features, metadata) pairs where:
+            features : np.ndarray  [num_segments, feature_dim]
+            metadata : dict        from source.metadata()
 
-    # ----------------------------
-    # Video processing
-    # ----------------------------
-    def process_video(self, video_info, split):
-        """Process a single video and extract features"""
-        video_path = video_info['full_path']
+        The caller decides what to do with each pair (save to disk,
+        feed to model, buffer in FeatureBuffer, …).
 
-        if not os.path.exists(video_path):
-            print(f"❌ Video not found: {video_path}")
-            return False
+        This method works identically for DiskVideoSource and
+        CameraStreamSource — the pipeline never branches on source type.
+        """
+        accumulated_frames: List[np.ndarray] = []
+
+        for frame_batch in self.source.stream():
+            # Accumulate raw frames
+            accumulated_frames.extend(frame_batch)
+
+            # Once we have enough for at least one segment, process
+            if len(accumulated_frames) >= self.preprocessor.segment_length:
+                segments = self.preprocessor.to_segments(accumulated_frames)
+                if segments:
+                    features = self.feature_extractor.extract_features(segments)
+                    yield features, self.source.metadata()
+                accumulated_frames = []
+
+        # Process any leftover frames (tail of last video / stream flush)
+        if accumulated_frames:
+            segments = self.preprocessor.to_segments(accumulated_frames)
+            if segments:
+                features = self.feature_extractor.extract_features(segments)
+                yield features, self.source.metadata()
+
+    # ------------------------------------------------------------------
+    # Training mode — per-video extraction + save to disk
+    # ------------------------------------------------------------------
+
+    def extract_all_features(
+        self,
+        resume: bool = True,
+        force_reprocess: bool = False,
+        max_videos: Optional[int] = None,
+    ) -> Tuple[int, int]:
+        """
+        Extract features from all videos in a DiskVideoSource and save
+        them as .npz files.
+
+        Designed for offline/training use.  Uses DiskVideoSource.iter_videos()
+        so each video's features + metadata stay correctly paired.
+
+        Parameters
+        ----------
+        resume : bool
+            Skip videos already in the progress log.
+        force_reprocess : bool
+            Reprocess even if already logged.
+        max_videos : int | None
+            Process at most this many videos (for testing).
+
+        Returns
+        -------
+        (successful, failed) counts.
+        """
+        if not isinstance(self.source, DiskVideoSource):
+            raise TypeError(
+                "extract_all_features() requires a DiskVideoSource. "
+                "For live inference use extract_from_source() instead."
+            )
+
+        video_paths = self.source._video_paths
+        if max_videos:
+            video_paths = video_paths[:max_videos]
+
+        print("\n" + "=" * 70)
+        print(f"FEATURE EXTRACTION — {len(video_paths)} videos")
+        print(f"Source   : {self.source}")
+        print(f"Output   : {self.features_dir}")
+        print("=" * 70)
+
+        for video_path in video_paths:
+            filename = video_path.name
+
+            already_done = any(
+                item['filename'] == filename
+                for item in self._progress['processed']
+            )
+            if resume and already_done and not force_reprocess:
+                print(f"⏭️  Skipping (already processed): {filename}")
+                self._stats['successful'] += 1
+                continue
+
+            success = self._process_single_video(video_path)
+            self._stats['total_videos'] += 1
+            if success:
+                self._stats['successful'] += 1
+            else:
+                self._stats['failed'] += 1
+
+        self._print_summary()
+        return self._stats['successful'], self._stats['failed']
+
+    def _process_single_video(self, video_path: Path) -> bool:
+        """
+        Extract features for one video file and save to .npz.
+
+        The source streams frames; this method processes and saves them.
+        """
+        filename = video_path.name
+        video_meta = self.source.video_metadata_for(video_path)
 
         print(f"\n{'='*60}")
-        print(f"Processing: {video_info['filename']}")
-        print(f"Split: {split}, Label: {video_info['label']} ({video_info['class']})")
-        print(f"Path: {video_path}")
+        print(f"Processing : {filename}")
+        print(f"Label      : {video_meta['label']} ({video_meta['class']})")
         print(f"{'='*60}")
 
         try:
-            config = Config.from_yaml('configs/default.yaml')
-            
-            # Step 1: Read video
-            frames, fps, video_metadata = self.preprocessor.read_video(
-                video_path,
-                target_fps=config['feature_extraction']['target_fps']
-            )
-            if frames is None:
-                print(f"❌ Failed to read video")
+            # Collect all frames for this video from the source
+            all_frames: List[np.ndarray] = []
+            for frame_batch in self.source._stream_single_video(video_path):
+                all_frames.extend(frame_batch)
+
+            if not all_frames:
+                print(f"❌ No frames read from {filename}")
+                self._log_failure(filename, "no frames read")
                 return False
 
-            # Step 2: Create segments
-            segments = self.preprocessor.create_segments(
-                frames,
-                segment_length=config['dataset']['segment_length']
-            )
-            if len(segments) == 0:
-                print(f"❌ No segments created")
+            # Preprocess: frames → segments
+            segments = self.preprocessor.to_segments(all_frames)
+            if not segments:
+                print(f"❌ No segments created for {filename}")
+                self._log_failure(filename, "no segments created")
                 return False
 
-            # Step 3: Extract features
-            print("🔍 Extracting features...")
-            start_time = time.time()
+            # Extract features
+            print(f"🔍 Extracting features for {len(segments)} segments …")
+            t0 = time.time()
             features = self.feature_extractor.extract_features(segments)
-            extraction_time = time.time() - start_time
+            elapsed = time.time() - t0
 
             if features.shape[0] == 0:
-                print(f"❌ No features extracted")
+                print(f"❌ Empty feature array for {filename}")
+                self._log_failure(filename, "empty feature array")
                 return False
 
-            print(f"✅ Features extracted: {features.shape[0]} segments")
-            print(f"⏱️  Extraction time: {extraction_time:.2f} seconds")
+            print(f"✅ {features.shape[0]} segments × {features.shape[1]} features  ({elapsed:.1f}s)")
 
-            # Step 4: Save features
-            self._save_features(features, video_info, split)
+            # Save .npz
+            self._save_npz(features, video_meta)
 
-            # Step 5: Update progress
-            self.progress['processed'].append({
-                'filename': video_info['filename'],
-                'split': split,
-                'time': datetime.now().isoformat(),
-                'features_shape': features.shape,
-                'extraction_time': extraction_time
+            # Log progress
+            self._progress['processed'].append({
+                'filename':        filename,
+                'split':           video_meta['split'],
+                'features_shape':  list(features.shape),
+                'extraction_time': elapsed,
+                'timestamp':       datetime.now().isoformat(),
             })
             self._save_progress()
 
-            # Step 6: Cleanup
-            del frames, segments, features
+            # Free GPU memory
+            del all_frames, segments, features
             torch.cuda.empty_cache()
 
-            self.stats['successful'] += 1
             return True
 
-        except Exception as e:
-            print(f"❌ Error processing video: {e}")
+        except Exception as exc:
             import traceback
+            print(f"❌ Error processing {filename}: {exc}")
             traceback.print_exc()
-
-            self.progress['failed'].append({
-                'filename': video_info['filename'],
-                'split': split,
-                'error': str(e),
-                'timestamp': datetime.now().isoformat()
-            })
-            self._save_progress()
-
-            self.stats['failed'] += 1
+            self._log_failure(filename, str(exc))
             return False
 
-    # ----------------------------
-    # Extract all features
-    # ----------------------------
-    def extract_all_features(self, splits, max_videos_per_split=None,
-                             resume=True, force_reprocess=False):
-        print("=" * 70)
-        print("FEATURE EXTRACTION PIPELINE")
-        print("=" * 70)
+    # ------------------------------------------------------------------
+    # .npz saving (training sink — only called from training path)
+    # ------------------------------------------------------------------
 
-        total_processed = 0
+    def _save_npz(self, features: np.ndarray, video_meta: dict) -> Path:
+        """Save feature array + metadata to a compressed .npz file."""
+        split    = video_meta.get('split', 'train')
+        stem     = Path(video_meta['filename']).stem
+        out_path = self.features_dir / f"{split}_{stem}.npz"
 
-        # Only process training videos
-        split = 'train'
-        print(f"\n📂 Processing {split.upper()} split (normal videos only)")
-        print("-" * 40)
+        metadata = {
+            **video_meta,
+            'feature_dim':   features.shape[1],
+            'num_segments':  features.shape[0],
+            'extraction_time': datetime.now().isoformat(),
+            'dataset_type':  'normal_only' if video_meta['label'] == 0 else 'anomalous',
+        }
 
-        split_videos = splits[split]
-        if max_videos_per_split:
-            split_videos = split_videos[:max_videos_per_split]
+        np.savez_compressed(
+            out_path,
+            features=features.astype(np.float32),
+            metadata=metadata,
+        )
 
-        processed_count = 0
+        size_mb = out_path.stat().st_size / (1024 * 1024)
+        self._stats['total_features'] += 1
+        self._stats['total_size_mb'] += size_mb
 
-        for i, video_info in enumerate(tqdm(split_videos, desc=f"Processing {split}")):
-            # Check if already processed
-            already_processed = any(
-                item['filename'] == video_info['filename'] and item['split'] == split
-                for item in self.progress['processed']
-            )
+        print(f"💾 Saved: {out_path.name}  ({size_mb:.2f} MB)")
+        return out_path
 
-            if resume and already_processed and not force_reprocess:
-                print(f"⏭️  Skipping (already processed): {video_info['filename']}")
-                processed_count += 1
-                continue
+    def _log_failure(self, filename: str, reason: str) -> None:
+        self._progress['failed'].append({
+            'filename':  filename,
+            'error':     reason,
+            'timestamp': datetime.now().isoformat(),
+        })
+        self._save_progress()
 
-            success = self.process_video(video_info, split)
-            if success:
-                processed_count += 1
-
-            time.sleep(0.1)
-
-            if (i + 1) % 5 == 0:
-                print(f"\n📊 Progress: {i+1}/{len(split_videos)} videos")
-
-        total_processed += processed_count
-        self.stats['total_videos'] += len(split_videos)
-
-        print(f"\n✅ {split.upper()} split completed:")
-        print(f"   Processed: {processed_count}/{len(split_videos)}")
-
-        # Skip test split if empty
-        test_videos = splits.get('test', [])
-        if len(test_videos) > 0:
-            print(f"\n📂 Processing TEST split")
-            print("-" * 40)
-            print(f"   Test videos: {len(test_videos)}")
-        else:
-            print(f"\n📂 TEST split: No test videos in dataset")
-            print(f"   This is correct for normal training videos")
-
+    def _print_summary(self) -> None:
+        s = self._stats
         print(f"\n{'='*70}")
         print("EXTRACTION SUMMARY")
         print(f"{'='*70}")
-        print(f"Total videos: {self.stats['total_videos']}")
-        print(f"Successfully processed: {self.stats['successful']}")
-        print(f"Failed: {self.stats['failed']}")
-        print(f"Feature files created: {self.stats['total_features']}")
-        print(f"Total storage used: {self.stats['total_size_mb']:.2f} MB")
-        print(f"Progress saved to: {self.progress_file}")
+        print(f"Total videos      : {s['total_videos']}")
+        print(f"Successful        : {s['successful']}")
+        print(f"Failed            : {s['failed']}")
+        print(f"Feature files     : {s['total_features']}")
+        print(f"Storage used      : {s['total_size_mb']:.2f} MB")
 
-        self._save_progress()
-        return self.stats['successful'], self.stats['failed']
+    # ------------------------------------------------------------------
+    # Status reporting
+    # ------------------------------------------------------------------
 
-    # ----------------------------
-    # Analyze features
-    # ----------------------------
-    def analyze_features(self):
-        """Analyze extracted features"""
-        feature_files = [f for f in os.listdir(self.features_dir) if f.endswith('.npz')]
+    def check_status(self) -> None:
+        """Print a summary of what has been extracted so far."""
+        npz_files = list(self.features_dir.glob('*.npz'))
+        train_files = [f for f in npz_files if f.name.startswith('train_')]
+        test_files  = [f for f in npz_files if f.name.startswith('test_')]
+        total_mb = sum(f.stat().st_size for f in npz_files) / (1024 * 1024)
 
-        if not feature_files:
-            print("❌ No feature files found")
-            return
-
-        print(f"\n📊 Found {len(feature_files)} feature files")
-
-        # Collect statistics
-        shapes = []
-        train_count = 0
-        test_count = 0
-
-        for filename in feature_files[:5]:
-            filepath = os.path.join(self.features_dir, filename)
-            data = np.load(filepath, allow_pickle=True)
-            features = data['features']
-            metadata = data['metadata'].item()
-
-            shapes.append(features.shape)
-
-            if metadata['split'] == 'train':
-                train_count += 1
-            else:
-                test_count += 1
-
-        print(f"\n📈 Feature Analysis:")
-        print(f"   Train files: {train_count}")
-        print(f"   Test files: {test_count}")
-
-        if shapes:
-            avg_shape = np.mean([s[0] for s in shapes]), np.mean([s[1] for s in shapes])
-            print(f"   Average shape: {avg_shape[0]:.1f} segments × {avg_shape[1]:.1f} features")
-
-            sample_file = os.path.join(self.features_dir, feature_files[0])
-            sample_data = np.load(sample_file, allow_pickle=True)
-            sample_features = sample_data['features']
-            sample_metadata = sample_data['metadata'].item()
-
-            print(f"\n📋 Sample file: {feature_files[0]}")
-            print(f"   Video: {sample_metadata['filename']}")
-            print(f"   Label: {sample_metadata['label']} ({sample_metadata['class']})")
-            print(f"   Feature shape: {sample_features.shape}")
-            print(f"   Extraction time: {sample_metadata['extraction_time']}")
-
-
-def process_in_batches(batch_size=50, features_subfolder='normal_training',
-                      input_video_dir='', features_dir='', metadata_dir='',
-                      feature_extractor=None, device='cuda'):
-    """
-    Process videos in batches to avoid timeouts
-
-    Args:
-        batch_size: Number of videos to process in each batch
-        features_subfolder: Subfolder to save features in
-        input_video_dir: Path to input video directory
-        features_dir: Path to features directory
-        metadata_dir: Path to metadata directory
-        feature_extractor: Feature extractor object
-        device: Device to use ('cuda' or 'cpu')
-    """
-    print("\n" + "=" * 70)
-    print(f"PROCESSING IN BATCHES OF {batch_size} VIDEOS")
-    print(f"Saving to: {features_subfolder}")
-    print("=" * 70)
-
-    # Create subfolder for features
-    subfolder_dir = os.path.join(features_dir, features_subfolder)
-    os.makedirs(subfolder_dir, exist_ok=True)
-    print(f"✅ Created subfolder: {subfolder_dir}")
-
-    # Load metadata
-    metadata_path = os.path.join(metadata_dir, 'dataset_metadata.pkl')
-    if not os.path.exists(metadata_path):
-        print("❌ Metadata file not found!")
-        return
-
-    import pickle
-    with open(metadata_path, 'rb') as f:
-        metadata = pickle.load(f)
-
-    all_splits = metadata['splits']
-
-    # Initialize pipeline with new features directory
-    pipeline = FeatureExtractionPipeline(
-        input_video_dir=input_video_dir,
-        features_dir=subfolder_dir,
-        metadata_dir=metadata_dir,
-        feature_extractor=feature_extractor,
-        device=device
-    )
-
-    total_processed = 0
-    total_failed = 0
-
-    print(f"\n📂 Processing TRAINING split (normal videos only)")
-    print("-" * 40)
-
-    train_videos = all_splits['train']
-    num_batches = (len(train_videos) + batch_size - 1) // batch_size
-
-    for batch_num in range(num_batches):
-        start_idx = batch_num * batch_size
-        end_idx = min((batch_num + 1) * batch_size, len(train_videos))
-        batch_videos = train_videos[start_idx:end_idx]
-
-        print(f"\n🔄 Batch {batch_num + 1}/{num_batches} "
-              f"(videos {start_idx + 1}-{end_idx})")
-
-        batch_split = {
-            'train': batch_videos,
-            'test': []
-        }
-
-        processed, failed = pipeline.extract_all_features(
-            splits=batch_split,
-            max_videos_per_split=None,
-            resume=True,
-            force_reprocess=False
-        )
-
-        total_processed += processed
-        total_failed += failed
-
-        print(f"\n📊 Batch {batch_num + 1} complete:")
-        print(f"   Processed: {processed}")
-        print(f"   Failed: {failed}")
-        print(f"   Total so far: {total_processed}")
-
-        if batch_num < num_batches - 1:
-            print(f"\n⏳ Waiting 30 seconds before next batch...")
-            time.sleep(30)
-
-    print("\n" + "=" * 70)
-    print("BATCH PROCESSING COMPLETE")
-    print("=" * 70)
-    print(f"✅ Total processed: {total_processed}")
-    print(f"❌ Total failed: {total_failed}")
-    print(f"📁 Features saved to: {subfolder_dir}")
-
-    return total_processed, total_failed
-
-
-def check_status(features_subfolder='normal_training', features_dir='', metadata_dir=''):
-    """Check current processing status"""
-    print("\n" + "=" * 70)
-    print(f"CURRENT PROCESSING STATUS: {features_subfolder}")
-    print("=" * 70)
-
-    subfolder_path = os.path.join(features_dir, features_subfolder)
-
-    if not os.path.exists(subfolder_path):
-        print(f"❌ Subfolder not found: {subfolder_path}")
-        print(f"   Try: 'normal_one' or 'normal_training'")
-        return
-
-    feature_files = [f for f in os.listdir(subfolder_path) if f.endswith('.npz')]
-
-    train_files = [f for f in feature_files if f.startswith('train_')]
-    test_files = [f for f in feature_files if f.startswith('test_')]
-
-    print(f"📊 Feature files created: {len(feature_files)}")
-    print(f"   • Training files: {len(train_files)} (NORMAL videos)")
-    print(f"   • Testing files: {len(test_files)} (should be 0)")
-
-    total_size = 0
-    for f in feature_files:
-        try:
-            total_size += os.path.getsize(os.path.join(subfolder_path, f))
-        except:
-            pass
-
-    print(f"💾 Total storage used: {total_size / (1024*1024):.2f} MB")
-
-    metadata_path = os.path.join(metadata_dir, 'dataset_metadata.pkl')
-    if os.path.exists(metadata_path):
-        import pickle
-        with open(metadata_path, 'rb') as f:
-            metadata = pickle.load(f)
-
-        print(f"\n📈 Progress against total dataset:")
-        print(f"   • Total normal videos: {metadata['total_videos']}")
-        print(f"   • Processed: {len(feature_files)}")
-        print(f"   • Remaining: {metadata['total_videos'] - len(feature_files)}")
-        print(f"   • Completion: {(len(feature_files) / metadata['total_videos']) * 100:.1f}%")
-
-        if 'note' in metadata:
-            print(f"   • Note: {metadata['note']}")
-
-    print(f"\n✅ SUMMARY:")
-    print(f"   • You are processing NORMAL training videos only")
-    print(f"   • These are for learning normal patterns")
-    print(f"   • You'll need UCF-Crime anomalous videos next")
+        print(f"\n{'='*70}")
+        print(f"STATUS — {self.features_dir}")
+        print(f"{'='*70}")
+        print(f"Feature files : {len(npz_files)}")
+        print(f"  • Train     : {len(train_files)}")
+        print(f"  • Test      : {len(test_files)}")
+        print(f"Storage       : {total_mb:.2f} MB")
+        print(f"Processed log : {len(self._progress['processed'])} entries")
+        print(f"Failed log    : {len(self._progress['failed'])} entries")

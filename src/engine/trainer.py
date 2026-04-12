@@ -40,7 +40,7 @@ class Trainer:
         )
         
         # Loss functions
-        from ..models import MILRankingLoss
+        from src.models import MILRankingLoss
         self.criterion_mil = MILRankingLoss(lambda1=8e-5, lambda2=8e-5)
         self.criterion_class = nn.CrossEntropyLoss()
 
@@ -110,7 +110,7 @@ def train_model(model, all_features, all_labels, batch_size=32, num_epochs=100,
     Returns:
         Trained model
     """
-    from ..data import VideoDataset, collate_fn_variable_length
+    from src.data import VideoDataset, collate_fn_variable_length
     
     # Create dataset and dataloader
     dataset = VideoDataset(all_features, all_labels)
