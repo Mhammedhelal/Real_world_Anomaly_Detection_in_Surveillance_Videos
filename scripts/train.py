@@ -1,233 +1,278 @@
 """
-Training entrypoint for the UCF-Crime Anomaly Detector.
+scripts/train.py
+----------------
+CLI entrypoint for training the UCF-Crime Anomaly Detector.
 
-Usage (Colab):
-    %run train.py --features-dir /content/drive/MyDrive/UCF_Crime/features --epochs 100
+Handles:
+  - Argument parsing
+  - Configuration loading and CLI overrides
+  - Orchestration (delegates to src.engine.trainer)
 
-Or import and call directly:
-    from train import train
-    train(features_dir=..., save_dir=..., epochs=100)
+Usage:
+    # Use defaults from config
+    python scripts/train.py --features-dir data/features/extracted
+
+    # Override config values
+    python scripts/train.py \
+        --features-dir data/features/extracted \
+        --epochs 50 \
+        --batch-size 16 \
+        --lr 0.001
+
+    # Resume training
+    python scripts/train.py \
+        --features-dir data/features/extracted \
+        --resume checkpoints/best_model.pt
+
+    # Use custom config
+    python scripts/train.py \
+        --features-dir data/features/extracted \
+        --config configs/custom.yaml
 """
 
-import os
 import argparse
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-
-# ── Model imports (adjust path if running from a subdirectory) ──────────────
 import sys
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pathlib import Path
 
-from src.models.anomaly_detector import AnomalyDetector
-from src.models.losses import MILRankingLoss
-from src.data import VideoFeatureDataset, collate_fn
+# Add project root to path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.config import Config
+from src.engine.trainer import train
 
 
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# Training function
-# ════════════════════════════════════════════════════════════════════════════
-
-def train(
-    features_dir: str,
-    save_dir: str = "./checkpoints",
-    epochs: int = 100,
-    batch_size: int = 32,
-    lr: float = 1.0,
-    input_size: int = 2131,
-    hidden_size: int = 256,
-    num_classes: int = 14,
-    lambda1: float = 8e-5,
-    lambda2: float = 8e-5,
-    save_every: int = 10,
-    device: str = None,
-):
-    """
-    Full training loop.
-
-    Args:
-        features_dir : Directory that contains .npz feature files.
-        save_dir     : Where to save model checkpoints.
-        epochs       : Number of training epochs.
-        batch_size   : Batch size for DataLoader.
-        lr           : Learning rate for Adadelta.
-        input_size   : Feature vector dimension (I3D 2048 + YOLO 83 = 2131).
-        hidden_size  : Bi-GRU hidden size.
-        num_classes  : Number of crime categories (14 for UCF-Crime).
-        lambda1      : Smoothness regularisation weight.
-        lambda2      : Sparsity regularisation weight.
-        save_every   : Save a checkpoint every N epochs.
-        device       : 'cuda' | 'cpu' | None (auto-detect).
-
-    Returns:
-        model        : Trained AnomalyDetector.
-        loss_history : List of per-epoch average losses.
-    """
-
-    # ── Device ──────────────────────────────────────────────────────────────
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(device)
-    print(f"🖥️  Using device: {device}")
-
-    # ── Data ────────────────────────────────────────────────────────────────
-    dataset = VideoFeatureDataset(features_dir, split="train")
-    if len(dataset) == 0:
-        raise RuntimeError(
-            f"No 'train_*.npz' files found in {features_dir}. "
-            "Run extract_features.py first."
-        )
-
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        collate_fn=collate_fn,
-        num_workers=0,   # 0 is safest for Colab
-        pin_memory=(device.type == "cuda"),
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Train the UCF-Crime anomaly detector.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    
+    # Required arguments
+    parser.add_argument(
+        "--features-dir",
+        type=str,
+        required=True,
+        help="Directory containing .npz feature files (train_*.npz)",
+    )
+    
+    # Output directory
+    parser.add_argument(
+        "--save-dir",
+        type=str,
+        default="./checkpoints",
+        help="Directory to save model checkpoints",
+    )
+    
+    # Configuration
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to YAML config file (default: configs/default.yaml)",
+    )
+    
+    # Training parameters (override config)
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Number of training epochs (overrides config)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Batch size (overrides config)",
+    )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=None,
+        help="Learning rate (overrides config)",
+    )
+    
+    # Model parameters (override config)
+    parser.add_argument(
+        "--input-size",
+        type=int,
+        default=None,
+        help="Feature vector dimension (overrides config)",
+    )
+    parser.add_argument(
+        "--hidden-size",
+        type=int,
+        default=None,
+        help="Bi-GRU hidden size (overrides config)",
+    )
+    parser.add_argument(
+        "--num-classes",
+        type=int,
+        default=None,
+        help="Number of crime categories (overrides config)",
+    )
+    
+    # Device
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        choices=["cuda", "cpu"],
+        help="Device to use (auto-detected if not specified)",
+    )
+    
+    # Resume training
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to checkpoint to resume training from",
+    )
+    
+    # Logging
+    parser.add_argument(
+        "--log-interval",
+        type=int,
+        default=None,
+        help="Print training stats every N batches (overrides config)",
+    )
+    parser.add_argument(
+        "--save-every",
+        type=int,
+        default=None,
+        help="Save checkpoint every N epochs (overrides config)",
+    )
+    
+    return parser.parse_args()
 
-    # ── Model ───────────────────────────────────────────────────────────────
-    model = AnomalyDetector(
-        input_size=input_size,
-        hidden_size=hidden_size,
-        num_classes=num_classes,
-    ).to(device)
 
-    print(f"🧠 AnomalyDetector | input={input_size} | hidden={hidden_size} | classes={num_classes}")
-    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"   Trainable parameters: {total_params:,}")
-
-    # ── Optimiser & losses ──────────────────────────────────────────────────
-    # Adadelta is the original choice from the notebook; robust to sparse gradients.
-    optimizer = optim.Adadelta(model.parameters(), lr=lr, rho=0.9, eps=1e-6)
-
-    criterion_mil   = MILRankingLoss(lambda1=lambda1, lambda2=lambda2)
-    criterion_class = nn.CrossEntropyLoss()
-
-    # ── Checkpoint directory ─────────────────────────────────────────────────
-    os.makedirs(save_dir, exist_ok=True)
-
-    # ── Training loop ────────────────────────────────────────────────────────
-    loss_history = []
-
-    for epoch in range(1, epochs + 1):
-        model.train()
-        epoch_loss = 0.0
-        num_batches = 0
-
-        for features, labels in loader:
-            features = features.to(device)
-            labels   = labels.to(device)
-
-            # Forward
-            anomaly_scores, class_logits = model(features)
-
-            # MIL ranking loss
-            loss_mil = criterion_mil(anomaly_scores, labels)
-
-            # Classification loss: flatten time axis → [B*S, C]
-            num_segments = features.size(1)
-            # Repeat each video label for every segment
-            labels_expanded = labels.repeat_interleave(num_segments)
-            loss_cls = criterion_class(
-                class_logits.view(-1, num_classes),
-                labels_expanded,
-            )
-
-            total_loss = loss_mil + loss_cls
-
-            optimizer.zero_grad()
-            total_loss.backward()
-            optimizer.step()
-
-            epoch_loss  += total_loss.item()
-            num_batches += 1
-
-        avg_loss = epoch_loss / max(num_batches, 1)
-        loss_history.append(avg_loss)
-
-        if epoch % 10 == 0 or epoch == 1:
-            print(f"Epoch [{epoch:>4}/{epochs}]  Loss: {avg_loss:.4f}")
-
-        # Save checkpoint
-        if epoch % save_every == 0 or epoch == epochs:
-            ckpt_path = os.path.join(save_dir, f"anomaly_detector_epoch{epoch:04d}.pt")
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "loss": avg_loss,
-                    "config": {
-                        "input_size": input_size,
-                        "hidden_size": hidden_size,
-                        "num_classes": num_classes,
-                    },
-                },
-                ckpt_path,
-            )
-            print(f"💾 Checkpoint saved → {ckpt_path}")
-
-    print(f"\n✅ Training complete. Best loss: {min(loss_history):.4f}")
-    return model, loss_history
+def load_config_with_overrides(args: argparse.Namespace) -> Config:
+    """
+    Load configuration and apply CLI overrides.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed command-line arguments
+    
+    Returns
+    -------
+    Config
+        Configuration object with overrides applied
+    """
+    # Load base config
+    if args.config:
+        config = Config.from_yaml(args.config)
+        print(f"📄 Loaded config from: {args.config}")
+    else:
+        config_path = Path(__file__).parent.parent / 'configs' / 'default.yaml'
+        config = Config.from_yaml(config_path)
+        print(f"📄 Loaded default config from: {config_path}")
+    
+    # Apply CLI overrides
+    overrides = {}
+    
+    # Training parameters
+    if args.epochs is not None:
+        overrides.setdefault('training', {})['num_epochs'] = args.epochs
+    if args.batch_size is not None:
+        overrides.setdefault('training', {})['batch_size'] = args.batch_size
+    if args.lr is not None:
+        overrides.setdefault('optimizer', {})['learning_rate'] = args.lr
+    
+    # Model parameters
+    if args.input_size is not None:
+        overrides.setdefault('model', {})['input_size'] = args.input_size
+    if args.hidden_size is not None:
+        overrides.setdefault('model', {})['hidden_size'] = args.hidden_size
+    if args.num_classes is not None:
+        overrides.setdefault('model', {})['num_classes'] = args.num_classes
+    
+    # Logging parameters
+    if args.log_interval is not None:
+        overrides.setdefault('logging', {})['log_interval'] = args.log_interval
+    if args.save_every is not None:
+        overrides.setdefault('logging', {})['save_interval'] = args.save_every
+    
+    # Apply overrides
+    if overrides:
+        print(f"⚙️  Applying CLI overrides: {overrides}")
+        config.merge(overrides)
+    
+    return config
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# CLI
-# ════════════════════════════════════════════════════════════════════════════
-
-def parse_args():
-    p = argparse.ArgumentParser(description="Train the UCF-Crime anomaly detector.")
-    p.add_argument("--features-dir", type=str, required=True,
-                   help="Root directory containing .npz feature files.")
-    p.add_argument("--save-dir", type=str, default="./checkpoints",
-                   help="Directory to save model checkpoints.")
-    p.add_argument("--epochs",      type=int,   default=100)
-    p.add_argument("--batch-size",  type=int,   default=32)
-    p.add_argument("--lr",          type=float, default=1.0)
-    p.add_argument("--input-size",  type=int,   default=2131,
-                   help="Feature vector dimension (default: 2048 I3D + 83 YOLO = 2131).")
-    p.add_argument("--hidden-size", type=int,   default=256)
-    p.add_argument("--num-classes", type=int,   default=14)
-    p.add_argument("--save-every",  type=int,   default=10,
-                   help="Save checkpoint every N epochs.")
-    p.add_argument("--device", type=str, default=None,
-                   help="'cuda' or 'cpu'. Auto-detected if not set.")
-    return p.parse_args()
+def main() -> None:
+    """Main training entrypoint."""
+    # Parse arguments
+    args = parse_args()
+    
+    # Load config with overrides
+    config = load_config_with_overrides(args)
+    
+    # Print configuration summary
+    print("\n" + "=" * 70)
+    print("TRAINING CONFIGURATION")
+    print("=" * 70)
+    print(f"Features dir:    {args.features_dir}")
+    print(f"Save dir:        {args.save_dir}")
+    print(f"Epochs:          {config.training.num_epochs}")
+    print(f"Batch size:      {config.training.batch_size}")
+    print(f"Learning rate:   {config.optimizer.learning_rate}")
+    print(f"Optimizer:       {config.optimizer.type}")
+    print(f"Input size:      {config.model.input_size}")
+    print(f"Hidden size:     {config.model.hidden_size}")
+    print(f"Num classes:     {config.model.num_classes}")
+    print(f"Device:          {args.device or 'auto'}")
+    if args.resume:
+        print(f"Resume from:     {args.resume}")
+    print("=" * 70 + "\n")
+    
+    try:
+        # Train model (delegates to engine)
+        trained_model, loss_history = train(
+            features_dir=args.features_dir,
+            save_dir=args.save_dir,
+            config=config,
+            device=args.device,
+            resume_from=args.resume,
+        )
+        
+        # Plot training loss
+        try:
+            import matplotlib.pyplot as plt
+            
+            plt.figure(figsize=(10, 4))
+            plt.plot(loss_history, linewidth=2)
+            plt.xlabel("Epoch")
+            plt.ylabel("Loss")
+            plt.title("Training Loss")
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            
+            plot_path = Path(args.save_dir) / "training_loss.png"
+            plt.savefig(plot_path, dpi=150)
+            print(f"\n📈 Training loss plot saved to: {plot_path}")
+            plt.show()
+        except ImportError:
+            print("\n⚠️  matplotlib not installed. Skipping loss plot.")
+        except Exception as e:
+            print(f"\n⚠️  Could not generate loss plot: {e}")
+        
+        print("\n✅ Training completed successfully!")
+        print(f"Final loss: {loss_history[-1]:.4f}")
+        print(f"Best loss:  {min(loss_history):.4f}")
+        print(f"Checkpoints saved to: {args.save_dir}")
+    
+    except KeyboardInterrupt:
+        print("\n⚠️  Training interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n❌ Training failed: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    model, history = train(
-        features_dir=args.features_dir,
-        save_dir=args.save_dir,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        lr=args.lr,
-        input_size=args.input_size,
-        hidden_size=args.hidden_size,
-        num_classes=args.num_classes,
-        save_every=args.save_every,
-        device=args.device,
-    )
-
-    # Quick loss plot (no dependency on src.utils)
-    try:
-        import matplotlib.pyplot as plt
-        plt.figure(figsize=(10, 4))
-        plt.plot(history, linewidth=2)
-        plt.xlabel("Epoch")
-        plt.ylabel("Loss")
-        plt.title("Training Loss")
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(os.path.join(args.save_dir, "training_loss.png"), dpi=150)
-        print("📈 Loss plot saved.")
-        plt.show()
-    except Exception:
-        pass
+    main()

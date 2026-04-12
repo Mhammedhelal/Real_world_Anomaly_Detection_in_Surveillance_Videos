@@ -1,259 +1,234 @@
 """
-Evaluation entrypoint for the UCF-Crime Anomaly Detector.
+scripts/evaluate.py
+-------------------
+CLI entrypoint for evaluating the UCF-Crime Anomaly Detector.
 
-Computes:
-  • Frame-level AUC-ROC  (primary metric for anomaly detection)
-  • Video-level classification accuracy + per-class report
-  • Confusion matrix
+Handles:
+  - Argument parsing
+  - Configuration loading and CLI overrides
+  - Orchestration (delegates to src.engine.evaluator)
 
-Usage (Colab):
-    %run evaluate.py \
-        --features-dir /content/drive/MyDrive/UCF_Crime/features \
-        --checkpoint    /content/drive/MyDrive/UCF_Crime/checkpoints/anomaly_detector_epoch0100.pt
+Usage:
+    # Basic evaluation
+    python scripts/evaluate.py \
+        --features-dir data/features/extracted \
+        --checkpoint checkpoints/best_model.pt
 
-Or import and call directly:
-    from evaluate import evaluate
-    results = evaluate(features_dir=..., checkpoint_path=...)
+    # Evaluate on train set (for debugging)
+    python scripts/evaluate.py \
+        --features-dir data/features/extracted \
+        --checkpoint checkpoints/best_model.pt \
+        --split train
+
+    # Save plots and results
+    python scripts/evaluate.py \
+        --features-dir data/features/extracted \
+        --checkpoint checkpoints/best_model.pt \
+        --save-dir outputs/evaluation
+
+    # Override batch size
+    python scripts/evaluate.py \
+        --features-dir data/features/extracted \
+        --checkpoint checkpoints/best_model.pt \
+        --batch-size 32
+
+    # Use custom config
+    python scripts/evaluate.py \
+        --features-dir data/features/extracted \
+        --checkpoint checkpoints/best_model.pt \
+        --config configs/custom.yaml
 """
 
-import os
 import argparse
-import numpy as np
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
-
 import sys
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pathlib import Path
 
-from src.models.anomaly_detector import AnomalyDetector
-from src.utils.checkpointing import load_model_from_checkpoint
-from src.utils.metrics import compute_auc
+# Add project root to path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# Reuse the dataset / collate 
-from src.data import VideoFeatureDataset, collate_fn
-
-# UCF-Crime class names
-ANOMALY_CLASSES = [
-    "Normal", "Abuse", "Arrest", "Arson", "Assault",
-    "Burglary", "Explosion", "Fighting", "Robbery",
-    "Shooting", "Shoplifting", "Stealing", "Vandalism", "RoadAccidents",
-]
+from src.config import Config
+from src.engine.evaluator import evaluate
 
 
-
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# Evaluation function
-# ════════════════════════════════════════════════════════════════════════════
-
-def evaluate(
-    features_dir: str,
-    checkpoint_path: str,
-    split: str = "test",
-    batch_size: int = 16,
-    num_classes: int = 14,
-    device: str = None,
-    plot: bool = True,
-    save_dir: str = None,
-) -> dict:
-    """
-    Run evaluation on pre-extracted features.
-
-    Args:
-        features_dir    : Root directory containing .npz feature files.
-        checkpoint_path : Path to .pt checkpoint saved by train.py.
-        split           : 'test' or 'train'.
-        batch_size      : Batch size for DataLoader.
-        num_classes     : Number of crime categories.
-        device          : 'cuda' | 'cpu' | None (auto).
-        plot            : Whether to show AUC and confusion matrix plots.
-        save_dir        : If set, saves plots here.
-
-    Returns:
-        Dictionary with keys: auc, accuracy, per_class_accuracy, confusion_matrix.
-    """
-
-    # ── Device ──────────────────────────────────────────────────────────────
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(device)
-    print(f"🖥️  Using device: {device}")
-
-    # ── Data ────────────────────────────────────────────────────────────────
-    dataset = VideoFeatureDataset(features_dir, split=split)
-    if len(dataset) == 0:
-        raise RuntimeError(
-            f"No '{split}_*.npz' files found in {features_dir}. "
-            "Run extract_features.py first."
-        )
-
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=0,
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Evaluate the UCF-Crime anomaly detector.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-
-    # ── Model ───────────────────────────────────────────────────────────────
-    model = load_model_from_checkpoint(checkpoint_path, device)
-
-    # ── Inference ───────────────────────────────────────────────────────────
-    all_anomaly_scores = []   # max anomaly score per video
-    all_binary_labels  = []   # 0=normal, 1=anomalous  (for AUC)
-    all_true_labels    = []   # full class index        (for accuracy)
-    all_pred_labels    = []   # predicted class index
-
-    with torch.no_grad():
-        for features, labels in loader:
-            features = features.to(device)
-            labels_np = labels.numpy()
-
-            anomaly_scores, class_probs = model(features)
-            # anomaly_scores: [B, S, 1]  →  max over segments
-            scores = anomaly_scores.squeeze(-1).cpu().numpy()   # [B, S]
-            max_scores = scores.max(axis=1)                     # [B]
-
-            # Video-level classification: mean class prob across segments
-            mean_probs = class_probs.mean(dim=1).cpu().numpy()  # [B, C]
-            pred_classes = mean_probs.argmax(axis=1)            # [B]
-
-            all_anomaly_scores.extend(max_scores.tolist())
-            all_binary_labels.extend((labels_np > 0).astype(int).tolist())
-            all_true_labels.extend(labels_np.tolist())
-            all_pred_labels.extend(pred_classes.tolist())
-
-    all_anomaly_scores = np.array(all_anomaly_scores)
-    all_binary_labels  = np.array(all_binary_labels)
-    all_true_labels    = np.array(all_true_labels)
-    all_pred_labels    = np.array(all_pred_labels)
-
-    # ── Metrics ─────────────────────────────────────────────────────────────
-
-    # 1. Frame-level AUC (approximated at video level here)
-    auc = compute_auc(all_binary_labels, all_anomaly_scores)
-    print(f"\n📊 AUC-ROC (video-level): {auc:.4f}")
-
-    # 2. Overall classification accuracy
-    accuracy = (all_pred_labels == all_true_labels).mean()
-    print(f"🎯 Classification Accuracy: {accuracy*100:.2f}%")
-
-    # 3. Per-class accuracy
-    per_class_acc = {}
-    print("\n📋 Per-class accuracy:")
-    for cls_idx in range(num_classes):
-        mask = all_true_labels == cls_idx
-        if mask.sum() == 0:
-            continue
-        cls_acc = (all_pred_labels[mask] == cls_idx).mean()
-        cls_name = ANOMALY_CLASSES[cls_idx] if cls_idx < len(ANOMALY_CLASSES) else str(cls_idx)
-        per_class_acc[cls_name] = float(cls_acc)
-        print(f"   {cls_name:<15} : {cls_acc*100:.1f}%  ({mask.sum()} videos)")
-
-    # 4. Confusion matrix (raw counts)
-    confusion = np.zeros((num_classes, num_classes), dtype=int)
-    for t, p in zip(all_true_labels, all_pred_labels):
-        if 0 <= t < num_classes and 0 <= p < num_classes:
-            confusion[t, p] += 1
-
-    # ── Plots ───────────────────────────────────────────────────────────────
-    if plot:
-        try:
-            import matplotlib.pyplot as plt
-            from matplotlib.colors import LogNorm
-
-            fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-
-            # — ROC curve —
-            desc_idx = np.argsort(all_anomaly_scores)[::-1]
-            y_sorted = all_binary_labels[desc_idx]
-            tp = np.cumsum(y_sorted)
-            fp = np.cumsum(1 - y_sorted)
-            tpr = tp / (tp[-1] + 1e-12)
-            fpr = fp / (fp[-1] + 1e-12)
-
-            axes[0].plot(fpr, tpr, color="crimson", linewidth=2,
-                         label=f"AUC = {auc:.4f}")
-            axes[0].plot([0, 1], [0, 1], "k--", alpha=0.5)
-            axes[0].set_xlabel("False Positive Rate")
-            axes[0].set_ylabel("True Positive Rate")
-            axes[0].set_title("ROC Curve (Video-Level)")
-            axes[0].legend()
-            axes[0].grid(True, alpha=0.3)
-
-            # — Confusion matrix —
-            present = sorted({t for t in all_true_labels} | {p for p in all_pred_labels})
-            sub_cm   = confusion[np.ix_(present, present)]
-            labels_present = [
-                ANOMALY_CLASSES[i] if i < len(ANOMALY_CLASSES) else str(i)
-                for i in present
-            ]
-
-            im = axes[1].imshow(sub_cm, cmap="Blues")
-            axes[1].set_xticks(range(len(present)))
-            axes[1].set_yticks(range(len(present)))
-            axes[1].set_xticklabels(labels_present, rotation=45, ha="right", fontsize=8)
-            axes[1].set_yticklabels(labels_present, fontsize=8)
-            axes[1].set_xlabel("Predicted")
-            axes[1].set_ylabel("True")
-            axes[1].set_title("Confusion Matrix")
-            fig.colorbar(im, ax=axes[1])
-
-            plt.tight_layout()
-
-            if save_dir:
-                os.makedirs(save_dir, exist_ok=True)
-                fig_path = os.path.join(save_dir, "evaluation_results.png")
-                plt.savefig(fig_path, dpi=150)
-                print(f"💾 Evaluation plots saved → {fig_path}")
-
-            plt.show()
-
-        except Exception as e:
-            print(f"⚠️  Could not produce plots: {e}")
-
-    results = {
-        "auc": auc,
-        "accuracy": float(accuracy),
-        "per_class_accuracy": per_class_acc,
-        "confusion_matrix": confusion,
-    }
-    return results
+    
+    # Required arguments
+    parser.add_argument(
+        "--features-dir",
+        type=str,
+        required=True,
+        help="Directory containing .npz feature files",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        required=True,
+        help="Path to trained model checkpoint (.pt file)",
+    )
+    
+    # Evaluation parameters
+    parser.add_argument(
+        "--split",
+        type=str,
+        default="test",
+        choices=["train", "test"],
+        help="Which split to evaluate on",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Batch size for evaluation (overrides config)",
+    )
+    parser.add_argument(
+        "--num-classes",
+        type=int,
+        default=None,
+        help="Number of crime categories (overrides config)",
+    )
+    
+    # Configuration
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to YAML config file (default: configs/default.yaml)",
+    )
+    
+    # Device
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        choices=["cuda", "cpu"],
+        help="Device to use (auto-detected if not specified)",
+    )
+    
+    # Output options
+    parser.add_argument(
+        "--save-dir",
+        type=str,
+        default=None,
+        help="Directory to save evaluation plots and results",
+    )
+    parser.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="Disable interactive plot display",
+    )
+    
+    return parser.parse_args()
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# CLI
-# ════════════════════════════════════════════════════════════════════════════
+def load_config_with_overrides(args: argparse.Namespace) -> Config:
+    """
+    Load configuration and apply CLI overrides.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed command-line arguments
+    
+    Returns
+    -------
+    Config
+        Configuration object with overrides applied
+    """
+    # Load base config
+    if args.config:
+        config = Config.from_yaml(args.config)
+        print(f"📄 Loaded config from: {args.config}")
+    else:
+        config_path = Path(__file__).parent.parent / 'configs' / 'default.yaml'
+        config = Config.from_yaml(config_path)
+        print(f"📄 Loaded default config from: {config_path}")
+    
+    # Apply CLI overrides
+    overrides = {}
+    
+    if args.batch_size is not None:
+        overrides.setdefault('training', {})['batch_size'] = args.batch_size
+    if args.num_classes is not None:
+        overrides.setdefault('model', {})['num_classes'] = args.num_classes
+    
+    # Apply overrides
+    if overrides:
+        print(f"⚙️  Applying CLI overrides: {overrides}")
+        config.merge(overrides)
+    
+    return config
 
-def parse_args():
-    p = argparse.ArgumentParser(description="Evaluate the UCF-Crime anomaly detector.")
-    p.add_argument("--features-dir",   type=str, required=True,
-                   help="Root directory containing .npz feature files.")
-    p.add_argument("--checkpoint",     type=str, required=True,
-                   help="Path to .pt checkpoint file.")
-    p.add_argument("--split",          type=str, default="test",
-                   choices=["train", "test"])
-    p.add_argument("--batch-size",     type=int, default=16)
-    p.add_argument("--num-classes",    type=int, default=14)
-    p.add_argument("--device",         type=str, default=None)
-    p.add_argument("--save-dir",       type=str, default=None,
-                   help="Directory to save evaluation plots.")
-    p.add_argument("--no-plot", action="store_true",
-                   help="Disable matplotlib plots.")
-    return p.parse_args()
+
+def main() -> None:
+    """Main evaluation entrypoint."""
+    # Parse arguments
+    args = parse_args()
+    
+    # Load config with overrides
+    config = load_config_with_overrides(args)
+    
+    # Get effective values
+    batch_size = args.batch_size or config.training.batch_size
+    num_classes = args.num_classes or config.model.num_classes
+    
+    # Print configuration summary
+    print("\n" + "=" * 70)
+    print("EVALUATION CONFIGURATION")
+    print("=" * 70)
+    print(f"Features dir:    {args.features_dir}")
+    print(f"Checkpoint:      {args.checkpoint}")
+    print(f"Split:           {args.split}")
+    print(f"Batch size:      {batch_size}")
+    print(f"Num classes:     {num_classes}")
+    print(f"Device:          {args.device or 'auto'}")
+    if args.save_dir:
+        print(f"Save dir:        {args.save_dir}")
+    print("=" * 70 + "\n")
+    
+    try:
+        # Run evaluation (delegates to engine)
+        results = evaluate(
+            features_dir=args.features_dir,
+            checkpoint_path=args.checkpoint,
+            split=args.split,
+            batch_size=batch_size,
+            num_classes=num_classes,
+            device=args.device,
+            plot=not args.no_plot,
+            save_dir=args.save_dir,
+            config=config,
+        )
+        
+        # Print summary
+        print("\n" + "=" * 70)
+        print("EVALUATION SUMMARY")
+        print("=" * 70)
+        print(f"AUC-ROC:         {results['auc']:.4f}")
+        print(f"Accuracy:        {results['accuracy']*100:.2f}%")
+        print("\nPer-class accuracy:")
+        for cls_name, acc in results['per_class_accuracy'].items():
+            print(f"  {cls_name:<15} {acc*100:.1f}%")
+        print("=" * 70)
+        
+        if args.save_dir:
+            print(f"\n💾 Results saved to: {args.save_dir}")
+        
+        print("\n✅ Evaluation completed successfully!")
+    
+    except KeyboardInterrupt:
+        print("\n⚠️  Evaluation interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n❌ Evaluation failed: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    evaluate(
-        features_dir=args.features_dir,
-        checkpoint_path=args.checkpoint,
-        split=args.split,
-        batch_size=args.batch_size,
-        num_classes=args.num_classes,
-        device=args.device,
-        plot=not args.no_plot,
-        save_dir=args.save_dir,
-    )
+    main()
