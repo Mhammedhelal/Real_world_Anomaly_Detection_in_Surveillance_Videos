@@ -1,0 +1,21 @@
+# requirements.txt
+# Production inference service dependencies
+
+# Web framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+
+# ML/DL
+torch==2.1.2
+torchvision==0.16.2
+numpy==1.24.3
+Pillow==10.2.0
+
+# Feature extraction
+pytorchvideo==0.1.5
+ultralytics==8.1.0
+
+# Utilities
+pyyaml==6.0.1
+python-multipart==0.0.6

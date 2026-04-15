@@ -1,0 +1,63 @@
+# docker-compose.yml
+# Easy deployment for inference service
+
+version: '3.8'
+
+services:
+  anomaly-detector:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: anomaly-detection-api
+
+    ports:
+      - "8000:8000"
+
+    volumes:
+      # Mount trained model
+      - ./models:/app/models:ro
+
+      # Persistent storage for features/metadata (optional)
+      - ./data/features:/app/data/features
+      - ./data/metadata:/app/data/metadata
+
+    environment:
+      # Model configuration
+      - MODEL_CHECKPOINT=/app/models/best_model.pt
+      - INPUT_SIZE=2131
+      - HIDDEN_SIZE=256
+      - NUM_CLASSES=14
+
+      # Preprocessing
+      - FRAME_WIDTH=224
+      - FRAME_HEIGHT=224
+      - SEGMENT_LENGTH=16
+
+      # Inference
+      - ANOMALY_THRESHOLD=0.5
+      - DEVICE=cuda # Change to 'cpu' if no GPU
+
+      # Storage
+      - FEATURES_DIR=/app/data/features
+      - METADATA_DIR=/app/data/metadata
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+# For CPU-only deployment, use:
+# docker-compose -f docker-compose.yml -f docker-compose.cpu.yml up
