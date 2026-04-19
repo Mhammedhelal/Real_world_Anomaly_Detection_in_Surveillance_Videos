@@ -8,3 +8,7 @@ env/
 
 # Outputs
 outputs/
+
+
+PRODUCTION_READINESS.md
+copilot-instructions.md

@@ -1,1 +1,43 @@
-# Add required packages here
+# ============================================================
+# Real-world Anomaly Detection in Surveillance Videos
+# requirements.txt
+# ============================================================
+
+# --- Core ML ---
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+
+# --- Video / CV ---
+opencv-python>=4.8.0
+
+# --- Feature Extraction ---
+# pytorchvideo requires torch to be installed first
+# pip install pytorchvideo  (after torch)
+ultralytics>=8.0.0          # YOLOv8
+
+# --- Config ---
+PyYAML>=6.0
+
+# --- Utilities ---
+Pillow>=9.0.0
+tqdm>=4.65.0
+matplotlib>=3.7.0
+
+# --- Testing ---
+pytest>=7.0.0
+pytest-cov>=4.0.0
+
+# ============================================================
+# Installation order matters — install PyTorch first:
+#
+#   # CPU-only:
+#   pip install torch torchvision
+#
+#   # CUDA 11.8:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+#
+#   # Then install the rest:
+#   pip install pytorchvideo
+#   pip install -r requirements.txt
+# ============================================================

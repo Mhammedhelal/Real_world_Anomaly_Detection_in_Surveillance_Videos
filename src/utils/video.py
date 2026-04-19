@@ -1,15 +1,18 @@
 """
-Utility functions related to video files.
-
-This module contains only general-purpose video helpers and does not
-depend on dataset or label logic.
+src/utils/video.py
+------------------
+General-purpose video helpers — no dataset/label logic.
 """
 
 import os
 import cv2
 
+from src.utils.logging import get_logger
 
-def get_video_info(video_path):
+logger = get_logger(__name__)
+
+
+def get_video_info(video_path: str) -> dict | None:
     """Return basic metadata for a video using OpenCV."""
     try:
         cap = cv2.VideoCapture(video_path)
@@ -30,7 +33,8 @@ def get_video_info(video_path):
             'width': width,
             'height': height,
             'duration': duration,
-            'size_mb': os.path.getsize(video_path) / (1024 * 1024)
+            'size_mb': os.path.getsize(video_path) / (1024 * 1024),
         }
-    except Exception:
+    except Exception as exc:
+        logger.debug("get_video_info failed for %s: %s", video_path, exc)
         return None
