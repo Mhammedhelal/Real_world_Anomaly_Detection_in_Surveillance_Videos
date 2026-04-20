@@ -25,7 +25,7 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from inference_service.src.inference_pipeline import InferencePipeline
+from inference_service.src.pipeline import InferencePipeline
 from inference_service.src.config_loader import load_inference_config
 
 # Setup logging

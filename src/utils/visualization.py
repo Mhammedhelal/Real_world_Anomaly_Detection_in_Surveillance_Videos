@@ -1,9 +1,20 @@
 """
 src/utils/visualization.py
 --------------------------
-Visualization utilities for anomaly detection results.
+Visualization helpers for offline analysis, evaluation notebooks, and the
+Evaluator.plot_results() method.
 
-From: AnomalyDetector_helal_Feb_23.ipynb
+Scope
+-----
+These functions require ``matplotlib`` and are intended for use in:
+  - Jupyter notebooks during model analysis
+  - The Evaluator to render ROC + confusion matrix plots
+  - ``scripts/evaluate.py --no-plot`` skips them entirely
+
+They are NOT called from the real-time inference pipeline or the trainer.
+If matplotlib is not installed in a deployment environment that does not need
+plots, this file can be ignored — the rest of the codebase does not depend on
+it at runtime.
 """
 
 import torch

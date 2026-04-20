@@ -1,4 +1,7 @@
 # Configuration for Real-world Anomaly Detection in Surveillance Videos
+# Extracted from:
+#   - extractoin_normal_one_Feb_15.ipynb
+#   - AnomalyDetector_helal_Feb_23.ipynb
 
 # Dataset Configuration
 dataset:
@@ -61,7 +64,7 @@ loss:
 # Hardware Configuration
 hardware:
   device: 'cuda'
-  mixed_precision: false
+  mixed_precision: true   # enable AMP on CUDA; trainer ignores on CPU
 
 # Logging Configuration
 logging:
@@ -94,3 +97,13 @@ labels:
     11: 'Stealing'
     12: 'Vandalism'
     13: 'RoadAccidents'
+
+# Inference / Alert Configuration
+# anomaly_threshold is calibrated via:
+#   from src.utils.metrics import find_optimal_threshold
+#   t, f1 = find_optimal_threshold(val_labels, val_scores, metric="f1")
+inference:
+  anomaly_threshold: 0.5        # replace after calibration on val split
+  threshold_metric: 'f1'        # 'f1' or 'youden'
+  alert_min_confidence: 0.4     # minimum class-head confidence to include in alert
+  segment_length: 16            # must match dataset.segment_length

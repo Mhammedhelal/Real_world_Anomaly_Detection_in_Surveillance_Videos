@@ -28,7 +28,8 @@ from src.utils.logging import TrainingLogger, get_logger
 from src.utils.metrics import (
     MetricsTracker,
     compute_accuracy,
-    compute_auc,
+    compute_auc_roc,
+    compute_auc_pr,
     compute_confusion_matrix,
     compute_per_class_accuracy,
 )
@@ -129,14 +130,20 @@ class Evaluator:
                 f"No '{split}_*.npz' files found in {self.features_dir}."
             )
 
-        logger.info("Loaded %d %s samples", len(dataset), split)
+        num_workers = getattr(self.config.training, "num_workers", 4)
+        logger.info(
+            "Loaded %d %s samples  (%d skipped)  num_workers=%d",
+            len(dataset), split, dataset.n_skipped, num_workers,
+        )
 
         loader = DataLoader(
             dataset,
             batch_size=batch_size,
             shuffle=False,
             collate_fn=collate_fn,
-            num_workers=0,
+            num_workers=num_workers,
+            pin_memory=(self.device.type == "cuda"),
+            persistent_workers=(num_workers > 0),
         )
 
         logger.info("Running inference …")
@@ -188,15 +195,18 @@ class Evaluator:
         y_binary = np.array(all_binary)
 
         # Metrics — all from src.utils.metrics
-        auc = compute_auc(y_binary, y_score)
-        acc = compute_accuracy(y_true, y_pred)
+        auc_roc = compute_auc_roc(y_binary, y_score)
+        auc_pr  = compute_auc_pr(y_binary, y_score)
+        acc     = compute_accuracy(y_true, y_pred)
         per_class = compute_per_class_accuracy(
             y_true, y_pred, num_classes, class_names=ANOMALY_CLASSES
         )
         cm = compute_confusion_matrix(y_true, y_pred, num_classes)
 
         return {
-            "auc": auc,
+            "auc_roc": auc_roc,
+            "auc_pr":  auc_pr,
+            "auc":     auc_roc,   # backward-compat alias
             "accuracy": acc,
             "per_class_accuracy": per_class,
             "confusion_matrix": cm,
@@ -210,9 +220,10 @@ class Evaluator:
 
     def _log_results(self, results: Dict, split: str) -> None:
         logger.info(
-            "Eval [%s] AUC=%.4f  Accuracy=%.2f%%",
+            "Eval [%s] AUC-ROC=%.4f  AUC-PR=%.4f  Accuracy=%.2f%%",
             split,
-            results["auc"],
+            results["auc_roc"],
+            results["auc_pr"],
             results["accuracy"] * 100,
         )
         for cls_name, acc in results["per_class_accuracy"].items():
@@ -252,7 +263,8 @@ class Evaluator:
     def _plot_roc_curve(self, ax) -> None:
         scores = self.results["anomaly_scores"]
         labels = self.results["binary_labels"]
-        auc = self.results["auc"]
+        auc_roc = self.results["auc_roc"]
+        auc_pr  = self.results["auc_pr"]
 
         desc_idx = np.argsort(scores)[::-1]
         y_s = labels[desc_idx]
@@ -261,7 +273,8 @@ class Evaluator:
         tpr = tp / (tp[-1] + 1e-12)
         fpr = fp / (fp[-1] + 1e-12)
 
-        ax.plot(fpr, tpr, color="crimson", linewidth=2, label=f"AUC = {auc:.4f}")
+        ax.plot(fpr, tpr, color="crimson", linewidth=2,
+                label=f"AUC-ROC={auc_roc:.4f}  AUC-PR={auc_pr:.4f}")
         ax.plot([0, 1], [0, 1], "k--", alpha=0.5)
         ax.set_xlabel("False Positive Rate")
         ax.set_ylabel("True Positive Rate")
@@ -298,7 +311,8 @@ class Evaluator:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         serialisable = {
-            "auc": self.results["auc"],
+            "auc_roc": self.results["auc_roc"],
+            "auc_pr":  self.results["auc_pr"],
             "accuracy": self.results["accuracy"],
             "per_class_accuracy": self.results["per_class_accuracy"],
             "confusion_matrix": self.results["confusion_matrix"].tolist(),
