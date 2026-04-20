@@ -1,21 +1,21 @@
-# requirements.txt
-# Production inference service dependencies
+# inference_service/requirements.txt
+# Dependencies for the production inference container
 
 # Web framework
-fastapi==0.109.0
-uvicorn[standard]==0.27.0
-pydantic==2.5.3
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+pydantic==2.7.0
 
-# ML/DL
-torch==2.1.2
-torchvision==0.16.2
-numpy==1.24.3
-Pillow==10.2.0
+# ML / DL  (install CUDA variant in production)
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+Pillow>=10.0.0
 
 # Feature extraction
-pytorchvideo==0.1.5
-ultralytics==8.1.0
+pytorchvideo>=0.1.5
+ultralytics>=8.0.0
 
-# Utilities
-pyyaml==6.0.1
-python-multipart==0.0.6
+# Config + utilities
+PyYAML>=6.0
+opencv-python>=4.8.0

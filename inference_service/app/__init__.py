@@ -1,0 +1,1 @@
+"""inference_service/app — FastAPI application."""

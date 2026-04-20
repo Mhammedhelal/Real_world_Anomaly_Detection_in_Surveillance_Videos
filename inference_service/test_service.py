@@ -1,170 +1,174 @@
-#!/usr/bin/env python3
 """
-test_service.py
----------------
-Quick test script to verify inference service is working.
+inference_service/test_service.py
+----------------------------------
+Quick verification script — run after docker-compose up to confirm the
+service is healthy and inference works end-to-end.
 
-Usage:
-    python test_service.py
+Usage
+-----
+    python inference_service/test_service.py
+    python inference_service/test_service.py --url http://192.168.1.100:8000
 """
 
+from __future__ import annotations
+
+import argparse
 import base64
+import io
 import json
-import requests
 import sys
-from pathlib import Path
-from PIL import Image
+import urllib.request
+import urllib.error
+from typing import List
+
 import numpy as np
+from PIL import Image
 
 
-def create_test_frame(size=(640, 480)):
-    """Create a dummy test frame."""
-    # Create random RGB image
-    img_array = np.random.randint(0, 255, (size[1], size[0], 3), dtype=np.uint8)
-    img = Image.fromarray(img_array)
-    
-    # Save temporarily
-    test_path = Path('/tmp/test_frame.jpg')
-    img.save(test_path, 'JPEG')
-    
-    return test_path
+BASE_URL = "http://localhost:8000"
 
 
-def image_to_base64(image_path):
-    """Convert image to base64 string."""
-    with open(image_path, 'rb') as f:
-        return base64.b64encode(f.read()).decode('utf-8')
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_frame(width: int = 224, height: int = 224) -> str:
+    """Create a random RGB frame and return it as a base64 JPEG string."""
+    arr = np.random.randint(0, 255, (height, width, 3), dtype=np.uint8)
+    img = Image.fromarray(arr)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    return base64.b64encode(buf.getvalue()).decode()
 
 
-def test_health_check(base_url='http://localhost:8000'):
-    """Test /health endpoint."""
-    print('\n1️⃣ Testing health check...')
-    
+def _get(path: str) -> dict:
+    req = urllib.request.Request(f"{BASE_URL}{path}")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read())
+
+
+def _post(path: str, body: dict) -> dict:
+    data = json.dumps(body).encode()
+    req  = urllib.request.Request(
+        f"{BASE_URL}{path}", data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read())
+
+
+def _put(path: str, body: dict) -> dict:
+    data = json.dumps(body).encode()
+    req  = urllib.request.Request(
+        f"{BASE_URL}{path}", data=data,
+        headers={"Content-Type": "application/json"},
+        method="PUT",
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read())
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+def test_health() -> bool:
+    print("\n1. Health check …", end=" ")
     try:
-        response = requests.get(f'{base_url}/health', timeout=5)
-        response.raise_for_status()
-        
-        data = response.json()
-        print(f'   ✅ Status: {data["status"]}')
-        print(f'   ✅ Model loaded: {data["model_loaded"]}')
-        print(f'   ✅ Device: {data["device"]}')
-        
-        return True
-    
-    except requests.exceptions.ConnectionError:
-        print('   ❌ Connection failed. Is the service running?')
-        print('      Start with: docker-compose up -d')
-        return False
-    
-    except Exception as e:
-        print(f'   ❌ Health check failed: {e}')
+        data = _get("/health")
+        ok = data.get("model_loaded", False)
+        print(f"✅ status={data['status']}  device={data['device']}  threshold={data['threshold']}")
+        return ok
+    except Exception as exc:
+        print(f"❌ {exc}")
         return False
 
 
-def test_predict(base_url='http://localhost:8000'):
-    """Test /predict endpoint."""
-    print('\n2️⃣ Testing prediction...')
-    
+def test_predict() -> bool:
+    print("2. Prediction …", end=" ")
     try:
-        # Create test frame
-        test_frame_path = create_test_frame()
-        frame_base64 = image_to_base64(test_frame_path)
-        
-        # Prepare request
-        payload = {
-            'frames': [frame_base64],
-            'timestamp': '2024-01-15T10:30:00Z',
-            'save_features': False
-        }
-        
-        # Send request
-        print('   📤 Sending request...')
-        response = requests.post(
-            f'{base_url}/predict',
-            json=payload,
-            timeout=30
-        )
-        response.raise_for_status()
-        
-        # Parse response
-        result = response.json()
-        
-        print(f'   ✅ Anomaly Score: {result["anomaly_score"]:.3f}')
-        print(f'   ✅ Is Anomaly: {result["is_anomaly"]}')
-        print(f'   ✅ Predicted Class: {result["predicted_class"]}')
-        print(f'   ✅ Confidence: {result["confidence"]:.3f}')
-        print(f'   ✅ Processing Time: {result["processing_time_ms"]:.1f}ms')
-        
-        # Cleanup
-        test_frame_path.unlink()
-        
+        frames = [_make_frame() for _ in range(16)]
+        data = _post("/predict", {"frames": frames})
+        score = data["anomaly_score"]
+        cls   = data["predicted_class"]
+        ms    = data["inference_time_ms"]
+        loc   = data.get("localisation")
+        loc_str = f"  boxes={loc['num_detections']}" if loc else "  no boxes (normal)"
+        print(f"✅ score={score:.3f}  class={cls}  {ms:.0f}ms{loc_str}")
         return True
-    
-    except requests.exceptions.Timeout:
-        print('   ❌ Request timeout. Model might be loading...')
-        return False
-    
-    except Exception as e:
-        print(f'   ❌ Prediction failed: {e}')
+    except Exception as exc:
+        print(f"❌ {exc}")
         return False
 
 
-def test_api_documentation(base_url='http://localhost:8000'):
-    """Test API docs endpoints."""
-    print('\n3️⃣ Testing API documentation...')
-    
+def test_threshold_update() -> bool:
+    print("3. Threshold update …", end=" ")
     try:
-        # Swagger UI
-        response = requests.get(f'{base_url}/docs', timeout=5)
-        if response.status_code == 200:
-            print('   ✅ Swagger UI available at: {}/docs'.format(base_url))
-        
-        # ReDoc
-        response = requests.get(f'{base_url}/redoc', timeout=5)
-        if response.status_code == 200:
-            print('   ✅ ReDoc available at: {}/redoc'.format(base_url))
-        
-        return True
-    
-    except Exception as e:
-        print(f'   ⚠️  Documentation check failed: {e}')
+        original = _get("/threshold")["threshold"]
+        _put("/threshold", {"threshold": 0.42})
+        updated = _get("/threshold")["threshold"]
+        # restore
+        _put("/threshold", {"threshold": original})
+        ok = abs(updated - 0.42) < 1e-5
+        print(f"✅ set 0.42  →  got {updated:.4f}")
+        return ok
+    except Exception as exc:
+        print(f"❌ {exc}")
         return False
 
 
-def main():
-    """Run all tests."""
-    print('=' * 60)
-    print('🧪 Anomaly Detection Service - Test Suite')
-    print('=' * 60)
-    
-    base_url = 'http://localhost:8000'
-    
-    # Run tests
-    health_ok = test_health_check(base_url)
-    
-    if not health_ok:
-        print('\n❌ Service is not healthy. Aborting tests.')
-        sys.exit(1)
-    
-    predict_ok = test_predict(base_url)
-    docs_ok = test_api_documentation(base_url)
-    
-    # Summary
-    print('\n' + '=' * 60)
-    print('📊 Test Summary')
-    print('=' * 60)
-    print(f'Health Check: {"✅ PASS" if health_ok else "❌ FAIL"}')
-    print(f'Prediction:   {"✅ PASS" if predict_ok else "❌ FAIL"}')
-    print(f'API Docs:     {"✅ PASS" if docs_ok else "❌ FAIL"}')
-    print('=' * 60)
-    
-    if all([health_ok, predict_ok, docs_ok]):
-        print('\n🎉 All tests passed! Service is ready for production.')
-        sys.exit(0)
-    else:
-        print('\n⚠️  Some tests failed. Check logs: docker-compose logs')
-        sys.exit(1)
+def test_invalid_request() -> bool:
+    print("4. Invalid request handling …", end=" ")
+    try:
+        _post("/predict", {"frames": []})   # should return 422
+        print("❌ expected error but got 200")
+        return False
+    except urllib.error.HTTPError as exc:
+        if exc.code in (400, 422):
+            print(f"✅ correctly rejected with HTTP {exc.code}")
+            return True
+        print(f"❌ unexpected HTTP {exc.code}")
+        return False
+    except Exception as exc:
+        print(f"❌ {exc}")
+        return False
 
 
-if __name__ == '__main__':
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--url", default=BASE_URL, help="Service base URL")
+    args = parser.parse_args()
+
+    global BASE_URL
+    BASE_URL = args.url.rstrip("/")
+
+    print(f"\n{'='*55}")
+    print(f" Anomaly Detection Service — Smoke Tests")
+    print(f" Target: {BASE_URL}")
+    print(f"{'='*55}")
+
+    results = {
+        "health":    test_health(),
+        "predict":   test_predict(),
+        "threshold": test_threshold_update(),
+        "invalid":   test_invalid_request(),
+    }
+
+    print(f"\n{'='*55}")
+    passed = sum(results.values())
+    total  = len(results)
+    print(f" Results: {passed}/{total} passed")
+    for name, ok in results.items():
+        print(f"   {'✅' if ok else '❌'}  {name}")
+    print(f"{'='*55}\n")
+
+    sys.exit(0 if passed == total else 1)
+
+
+if __name__ == "__main__":
     main()
