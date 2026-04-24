@@ -9,6 +9,8 @@ Changes from original
 - Console output uses structured logging (get_logger / TrainingLogger).
 - load_model_from_checkpoint imported from src.utils.checkpointing.
 - evaluate() convenience function remains backward-compatible.
+- collate_fn now returns (features, labels, lengths); lengths passed to
+  AnomalyDetector.forward so the BiGRU packs sequences correctly.
 """
 
 from __future__ import annotations
@@ -170,19 +172,22 @@ class Evaluator:
         all_pred: List[int] = []
 
         with torch.no_grad():
-            for features, labels in loader:
+            # collate_fn yields (features, labels, lengths)
+            for features, labels, lengths in loader:
                 features = features.to(self.device)
                 labels_np = labels.numpy()
+                # lengths stays on CPU for pack_padded_sequence
 
-                anomaly_scores, class_probs = model(features)
+                # Pass lengths so GRU packs and skips padding zeros
+                anomaly_scores, class_probs = model(features, lengths=lengths)
 
-                # Video-level anomaly score: max over segments
-                scores = anomaly_scores.squeeze(-1).cpu().numpy().max(axis=1)
+                # Video-level anomaly score: max over REAL segments only.
+                # We use lengths to mask out padded positions before taking max
+                # so padding zeros (sigmoid(0)=0.5) cannot inflate the score.
+                scores = self._masked_max(anomaly_scores, lengths)
 
-                # Video-level class: mean prob over segments → argmax
-                pred_cls = (
-                    class_probs.mean(dim=1).cpu().numpy().argmax(axis=1)
-                )
+                # Video-level class: mean prob over real segments → argmax
+                pred_cls = self._masked_mean_argmax(class_probs, lengths)
 
                 all_scores.extend(scores.tolist())
                 all_binary.extend((labels_np > 0).astype(int).tolist())
@@ -215,6 +220,52 @@ class Evaluator:
             "true_labels": y_true,
             "pred_labels": y_pred,
         }
+
+    # ------------------------------------------------------------------
+    # Helpers for length-aware pooling
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _masked_max(
+        anomaly_scores: torch.Tensor,
+        lengths: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Max anomaly score over real (non-padded) segments per video.
+
+        anomaly_scores : [B, max_S, 1]
+        lengths        : [B]  (CPU LongTensor)
+        returns        : [B]  float
+        """
+        scores = anomaly_scores.squeeze(-1)          # [B, max_S]
+        B, max_S = scores.shape
+        # Build mask: True for real positions, False for padding
+        idx = torch.arange(max_S, device=scores.device).unsqueeze(0)  # [1, max_S]
+        mask = idx < lengths.to(scores.device).unsqueeze(1)           # [B, max_S]
+        # Replace padded positions with -inf so they never win the max
+        scores = scores.masked_fill(~mask, float("-inf"))
+        return scores.max(dim=1).values.cpu()
+
+    @staticmethod
+    def _masked_mean_argmax(
+        class_probs: torch.Tensor,
+        lengths: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Mean class probabilities over real segments → argmax class.
+
+        class_probs : [B, max_S, C]
+        lengths     : [B]  (CPU LongTensor)
+        returns     : [B]  long (predicted class index)
+        """
+        B, max_S, C = class_probs.shape
+        idx = torch.arange(max_S, device=class_probs.device).unsqueeze(0)  # [1, max_S]
+        mask = (idx < lengths.to(class_probs.device).unsqueeze(1))         # [B, max_S]
+        # Zero out padded positions, then divide by real length
+        mask_f = mask.unsqueeze(-1).float()                                 # [B, max_S, 1]
+        sum_probs = (class_probs * mask_f).sum(dim=1)                       # [B, C]
+        mean_probs = sum_probs / lengths.to(class_probs.device).float().unsqueeze(1)
+        return mean_probs.argmax(dim=1).cpu()
 
     # ------------------------------------------------------------------
 

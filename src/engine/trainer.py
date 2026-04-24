@@ -10,6 +10,8 @@ Fixes applied
 - Checkpoint logic delegates to save_checkpoint() / load_checkpoint().
 - All print() replaced with structured logging.
 - Metrics accumulated via MetricsTracker.
+- collate_fn now returns (features, labels, lengths); lengths passed to
+  AnomalyDetector.forward so the BiGRU packs sequences correctly.
 """
 
 from __future__ import annotations
@@ -155,14 +157,17 @@ class Trainer:
         self._tracker.reset()
         num_classes = self.config.model.num_classes
 
-        for batch_idx, (features, labels) in enumerate(self.train_loader):
+        # collate_fn yields (features, labels, lengths)
+        for batch_idx, (features, labels, lengths) in enumerate(self.train_loader):
             features = features.to(self.device, non_blocking=True)
             labels   = labels.to(self.device,   non_blocking=True)
+            # lengths stays on CPU — pack_padded_sequence requires it there
 
             self.optimizer.zero_grad(set_to_none=True)
 
             with autocast(enabled=self._use_amp):
-                anomaly_scores, class_logits = self.model(features)
+                # Pass lengths so the GRU packs and ignores padding zeros
+                anomaly_scores, class_logits = self.model(features, lengths=lengths)
 
                 loss_ranking = self.criterion_mil(anomaly_scores, labels)
 
@@ -348,5 +353,3 @@ def train(
 
 # backward-compat alias
 train_model = train
-
-

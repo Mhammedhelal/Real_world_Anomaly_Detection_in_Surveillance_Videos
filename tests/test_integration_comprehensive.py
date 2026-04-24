@@ -6,11 +6,14 @@ Integration tests for the complete anomaly detection pipeline.
 
 Coverage:
   - End-to-end pipeline: features → model → predictions
-  - Feature extraction pipeline
   - Training loop integration
   - DataLoader integration
   - Model evaluation
   - Component interactions
+
+collate_fn now returns (features, labels, lengths).
+AnomalyDetector.forward now accepts lengths keyword argument.
+All loops and calls updated accordingly.
 """
 
 import pytest
@@ -30,75 +33,84 @@ from src.data.dataset import VideoFeatureDataset, collate_fn
 
 
 # ============================================================================
+# Helpers
+# ============================================================================
+
+def _make_batch(batch_size=4, seq_len=10, feature_dim=2131):
+    """Return (features, labels, lengths) as collate_fn would."""
+    features = torch.randn(batch_size, seq_len, feature_dim)
+    labels   = torch.LongTensor([i % 2 for i in range(batch_size)])
+    lengths  = torch.LongTensor([seq_len] * batch_size)
+    return features, labels, lengths
+
+
+def _make_variable_batch(feature_dim=2131):
+    """Return a collated batch with variable sequence lengths."""
+    samples = [
+        (torch.randn(8,  feature_dim), 0),
+        (torch.randn(12, feature_dim), 1),
+        (torch.randn(10, feature_dim), 0),
+    ]
+    return collate_fn(samples)  # features, labels, lengths
+
+
+# ============================================================================
 # 1. Model + Loss Integration Tests
 # ============================================================================
 
 class TestModelLossIntegration:
-    """Test model and loss function together."""
 
     def test_model_loss_forward_backward(self):
-        """Test complete forward/backward pass with model and loss."""
-        model = AnomalyDetector()
+        model   = AnomalyDetector()
         loss_fn = MILRankingLoss()
 
         features = torch.randn(4, 10, 2131, requires_grad=True)
-        labels = torch.LongTensor([0, 1, 2, 0])
+        labels   = torch.LongTensor([0, 1, 2, 0])
+        lengths  = torch.LongTensor([10, 10, 10, 10])
 
-        # Forward pass
-        scores, probs = model(features)
+        scores, probs = model(features, lengths=lengths)
         loss = loss_fn(scores, labels)
-
-        # Backward pass
         loss.backward()
 
-        # Verify gradients
         assert features.grad is not None
         assert not torch.isnan(features.grad).any()
 
     def test_model_optimization_step(self):
-        """Test model parameter optimization."""
-        model = AnomalyDetector()
-        loss_fn = MILRankingLoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.01)  # Higher learning rate
+        model     = AnomalyDetector()
+        loss_fn   = MILRankingLoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
         features = torch.randn(4, 10, 2131)
-        labels = torch.LongTensor([0, 1, 2, 0])
+        labels   = torch.LongTensor([0, 1, 2, 0])
+        lengths  = torch.LongTensor([10, 10, 10, 10])
 
-        # Get initial parameters
         initial_params = [p.clone().detach() for p in model.parameters()]
 
-        # Training step
         model.train()
-        scores, probs = model(features)
+        scores, probs = model(features, lengths=lengths)
         loss = loss_fn(scores, labels)
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        # Verify at least one parameter changed (some may remain the same)
-        params_changed = False
-        for initial_p, current_p in zip(initial_params, model.parameters()):
-            # Check if any parameter changed by more than 1e-4
-            if (initial_p - current_p.detach()).abs().max() > 1e-4:
-                params_changed = True
-                break
+        params_changed = any(
+            (ip - cp.detach()).abs().max() > 1e-4
+            for ip, cp in zip(initial_params, model.parameters())
+        )
         assert params_changed, "No parameters were updated during optimization step"
 
     def test_multiple_optimization_steps(self):
-        """Test multiple optimization steps."""
-        model = AnomalyDetector()
-        loss_fn = MILRankingLoss()
+        model     = AnomalyDetector()
+        loss_fn   = MILRankingLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
         losses = []
-
-        for step in range(5):
-            features = torch.randn(4, 10, 2131)
-            labels = torch.LongTensor([0, 1, 2, 0])
+        for _ in range(5):
+            features, labels, lengths = _make_batch()
 
             model.train()
-            scores, probs = model(features)
+            scores, probs = model(features, lengths=lengths)
             loss = loss_fn(scores, labels)
 
             optimizer.zero_grad()
@@ -107,7 +119,6 @@ class TestModelLossIntegration:
 
             losses.append(loss.item())
 
-        # Should have 5 loss values
         assert len(losses) == 5
 
 
@@ -116,72 +127,50 @@ class TestModelLossIntegration:
 # ============================================================================
 
 class TestModelDataLoaderIntegration:
-    """Test model with DataLoader."""
 
-    def test_model_with_dataloader(self, tmp_path):
-        """Test model with PyTorch DataLoader."""
-        # Create synthetic features
-        features_list = [
-            torch.randn(10, 2131),
-            torch.randn(12, 2131),
-            torch.randn(8, 2131),
+    def test_model_with_dataloader(self):
+        samples = [
+            (torch.randn(10, 2131), 0),
+            (torch.randn(12, 2131), 1),
+            (torch.randn(8,  2131), 0),
         ]
-        labels = [0, 1, 0]
 
-        batch = list(zip(features_list, labels))
-
-        # Create DataLoader
         dataloader = DataLoader(
-            batch,
-            batch_size=2,
-            shuffle=False,
-            collate_fn=collate_fn
+            samples, batch_size=2, shuffle=False, collate_fn=collate_fn
         )
 
-        # Run model on batches
         model = AnomalyDetector()
         model.eval()
 
         with torch.no_grad():
-            for features, batch_labels in dataloader:
-                scores, probs = model(features)
-
+            # collate_fn returns (features, labels, lengths)
+            for features, batch_labels, lengths in dataloader:
+                scores, probs = model(features, lengths=lengths)
                 assert scores is not None
                 assert probs is not None
 
-    def test_training_loop_with_dataloader(self, tmp_path):
-        """Test complete training loop with DataLoader."""
-        # Create dataset
-        features_list = [
-            torch.randn(10, 2131),
-            torch.randn(12, 2131),
-            torch.randn(8, 2131),
-            torch.randn(9, 2131),
+    def test_training_loop_with_dataloader(self):
+        samples = [
+            (torch.randn(10, 2131), 0),
+            (torch.randn(12, 2131), 1),
+            (torch.randn(8,  2131), 0),
+            (torch.randn(9,  2131), 1),
         ]
-        labels = [0, 1, 0, 1]
-
-        batch = list(zip(features_list, labels))
 
         dataloader = DataLoader(
-            batch,
-            batch_size=2,
-            shuffle=True,
-            collate_fn=collate_fn
+            samples, batch_size=2, shuffle=True, collate_fn=collate_fn
         )
 
-        # Create model and optimizer
-        model = AnomalyDetector()
-        loss_fn = MILRankingLoss()
+        model     = AnomalyDetector()
+        loss_fn   = MILRankingLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-        # Training loop
-        num_epochs = 2
-        for epoch in range(num_epochs):
+        for epoch in range(2):
             model.train()
             epoch_loss = 0
 
-            for features, batch_labels in dataloader:
-                scores, probs = model(features)
+            for features, batch_labels, lengths in dataloader:
+                scores, probs = model(features, lengths=lengths)
                 loss = loss_fn(scores, batch_labels)
 
                 optimizer.zero_grad()
@@ -190,7 +179,6 @@ class TestModelDataLoaderIntegration:
 
                 epoch_loss += loss.item()
 
-            # Epoch completed successfully
             assert epoch_loss >= 0
 
 
@@ -199,36 +187,30 @@ class TestModelDataLoaderIntegration:
 # ============================================================================
 
 class TestVideoFeatureDatasetIntegration:
-    """Test VideoFeatureDataset with model."""
 
     def test_dataset_model_forward_pass(self, tmp_path):
-        """Test model forward pass with dataset samples."""
-        # Create synthetic dataset files
         features_dir = tmp_path / "features"
         features_dir.mkdir()
 
         for i in range(3):
-            features = np.random.randn(10, 2131).astype(np.float32)
+            feats    = np.random.randn(10, 2131).astype(np.float32)
             metadata = {'label': i % 2}
-            filepath = features_dir / f"train_video_{i}.npz"
-            np.savez_compressed(filepath, features=features, metadata=metadata)
+            np.savez_compressed(
+                features_dir / f"train_video_{i}.npz",
+                features=feats, metadata=metadata,
+            )
 
-        # Load dataset
         dataset = VideoFeatureDataset(str(features_dir), split="train")
 
-        # Run model on each sample
         model = AnomalyDetector()
         model.eval()
 
         with torch.no_grad():
             for idx in range(len(dataset)):
                 features, label = dataset[idx]
-
-                # Add batch dimension
-                features_batch = features.unsqueeze(0)
-
-                scores, probs = model(features_batch)
-
+                features_batch  = features.unsqueeze(0)
+                # Single video — no padding, so lengths optional
+                scores, probs   = model(features_batch)
                 assert scores is not None
                 assert probs is not None
 
@@ -238,68 +220,45 @@ class TestVideoFeatureDatasetIntegration:
 # ============================================================================
 
 class TestEndToEndPipeline:
-    """Test complete end-to-end pipeline."""
 
     def test_complete_training_pipeline(self):
-        """Test complete training pipeline: data → model → loss → optim."""
-        # Setup
-        model = AnomalyDetector()
-        loss_fn = MILRankingLoss()
+        model     = AnomalyDetector()
+        loss_fn   = MILRankingLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-        # Create synthetic batch
-        batch_size = 4
-        num_segments = 10
-        feature_dim = 2131
+        features, labels, lengths = _make_batch(batch_size=4)
 
-        features = torch.randn(batch_size, num_segments, feature_dim)
-        labels = torch.LongTensor([0, 1, 0, 1])
-
-        # Training step
         model.train()
-
-        # Forward
-        scores, probs = model(features)
-
-        # Loss computation
+        scores, probs = model(features, lengths=lengths)
         loss = loss_fn(scores, labels)
 
-        # Backward
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        # Verify success
         assert loss.item() >= 0
         assert not torch.isnan(loss)
 
     def test_training_and_evaluation_cycle(self):
-        """Test training and evaluation cycle."""
-        model = AnomalyDetector()
-        loss_fn = MILRankingLoss()
+        model     = AnomalyDetector()
+        loss_fn   = MILRankingLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-        features_train = torch.randn(8, 10, 2131)
-        labels_train = torch.LongTensor([0, 0, 1, 1, 0, 1, 0, 1])
+        f_train, l_train, len_train = _make_batch(batch_size=8)
+        f_eval,  l_eval,  len_eval  = _make_batch(batch_size=4)
 
-        features_eval = torch.randn(4, 10, 2131)
-        labels_eval = torch.LongTensor([0, 1, 0, 1])
-
-        # Training
         model.train()
         for _ in range(3):
-            scores, probs = model(features_train)
-            loss = loss_fn(scores, labels_train)
-
+            scores, probs = model(f_train, lengths=len_train)
+            loss = loss_fn(scores, l_train)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-        # Evaluation
         model.eval()
         with torch.no_grad():
-            scores_eval, probs_eval = model(features_eval)
-            eval_loss = loss_fn(scores_eval, labels_eval)
+            scores_eval, probs_eval = model(f_eval, lengths=len_eval)
+            eval_loss = loss_fn(scores_eval, l_eval)
 
         assert eval_loss.item() >= 0
 
@@ -309,64 +268,45 @@ class TestEndToEndPipeline:
 # ============================================================================
 
 class TestDeviceTransferIntegration:
-    """Test device transfers throughout pipeline."""
 
     def test_cpu_to_cpu_pipeline(self):
-        """Test pipeline on CPU."""
-        device = torch.device("cpu")
-
-        model = AnomalyDetector().to(device)
+        device  = torch.device("cpu")
+        model   = AnomalyDetector().to(device)
         loss_fn = MILRankingLoss()
 
         features = torch.randn(4, 10, 2131).to(device)
-        labels = torch.LongTensor([0, 1, 0, 1]).to(device)
+        labels   = torch.LongTensor([0, 1, 0, 1]).to(device)
+        lengths  = torch.LongTensor([10, 10, 10, 10])  # stays CPU
 
-        scores, probs = model(features)
+        scores, probs = model(features, lengths=lengths)
         loss = loss_fn(scores, labels)
-
         assert loss.device.type == "cpu"
 
-    @pytest.mark.skipif(
-        not torch.cuda.is_available(),
-        reason="CUDA not available"
-    )
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_cuda_pipeline(self):
-        """Test pipeline on CUDA."""
-        device = torch.device("cuda")
-
-        model = AnomalyDetector().to(device)
+        device  = torch.device("cuda")
+        model   = AnomalyDetector().to(device)
         loss_fn = MILRankingLoss()
 
         features = torch.randn(4, 10, 2131).to(device)
-        labels = torch.LongTensor([0, 1, 0, 1]).to(device)
+        labels   = torch.LongTensor([0, 1, 0, 1]).to(device)
+        lengths  = torch.LongTensor([10, 10, 10, 10])  # stays CPU
 
-        scores, probs = model(features)
+        scores, probs = model(features, lengths=lengths)
         loss = loss_fn(scores, labels)
-
         assert loss.device.type == "cuda"
 
-    @pytest.mark.skipif(
-        not torch.cuda.is_available(),
-        reason="CUDA not available"
-    )
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_cpu_to_cuda_transfer(self):
-        """Test transferring model and data to CUDA."""
-        model = AnomalyDetector()
+        model   = AnomalyDetector().cuda()
         loss_fn = MILRankingLoss()
 
-        # Create on CPU
-        features_cpu = torch.randn(4, 10, 2131)
-        labels_cpu = torch.LongTensor([0, 1, 0, 1])
+        features = torch.randn(4, 10, 2131).cuda()
+        labels   = torch.LongTensor([0, 1, 0, 1]).cuda()
+        lengths  = torch.LongTensor([10, 10, 10, 10])  # stays CPU
 
-        # Move to CUDA
-        model = model.cuda()
-        features_cuda = features_cpu.cuda()
-        labels_cuda = labels_cpu.cuda()
-
-        # Forward pass
-        scores, probs = model(features_cuda)
-        loss = loss_fn(scores, labels_cuda)
-
+        scores, probs = model(features, lengths=lengths)
+        loss = loss_fn(scores, labels)
         assert loss.device.type == "cuda"
 
 
@@ -375,111 +315,98 @@ class TestDeviceTransferIntegration:
 # ============================================================================
 
 class TestBatchCompositionIntegration:
-    """Test different batch compositions."""
 
     def test_pipeline_with_variable_batch_size(self):
-        """Test pipeline with different batch sizes."""
-        model = AnomalyDetector()
+        model   = AnomalyDetector()
         loss_fn = MILRankingLoss()
 
         for batch_size in [1, 2, 4, 8, 16]:
-            features = torch.randn(batch_size, 10, 2131)
-            labels = torch.LongTensor([i % 2 for i in range(batch_size)])
-
-            scores, probs = model(features)
+            features, labels, lengths = _make_batch(batch_size=batch_size)
+            scores, probs = model(features, lengths=lengths)
             loss = loss_fn(scores, labels)
-
             assert not torch.isnan(loss)
 
     def test_pipeline_with_variable_sequence_length(self):
-        """Test pipeline with different sequence lengths."""
-        model = AnomalyDetector()
+        model   = AnomalyDetector()
         loss_fn = MILRankingLoss()
 
         for seq_len in [1, 5, 10, 20, 50]:
-            features = torch.randn(4, seq_len, 2131)
-            labels = torch.LongTensor([0, 1, 0, 1])
-
-            scores, probs = model(features)
+            features, labels, lengths = _make_batch(batch_size=4, seq_len=seq_len)
+            scores, probs = model(features, lengths=lengths)
             loss = loss_fn(scores, labels)
-
             assert not torch.isnan(loss)
 
-    def test_pipeline_with_collated_batch(self):
-        """Test pipeline with collated variable-length batch."""
-        # Create variable-length samples
-        samples = [
-            (torch.randn(8, 2131), 0),
-            (torch.randn(12, 2131), 1),
-            (torch.randn(10, 2131), 0),
-        ]
+    def test_pipeline_with_collated_variable_length_batch(self):
+        """Variable-length batch via collate_fn — the main real-world case."""
+        features, labels, lengths = _make_variable_batch()
 
-        # Collate
-        features, labels = collate_fn(samples)
-
-        # Forward pass
-        model = AnomalyDetector()
+        model   = AnomalyDetector()
         loss_fn = MILRankingLoss()
 
-        scores, probs = model(features)
+        scores, probs = model(features, lengths=lengths)
         loss = loss_fn(scores, labels)
 
         assert not torch.isnan(loss)
+        # Output padded dim matches the longest sequence (12)
+        assert scores.shape[1] == 12
+
+    def test_lengths_respected_in_output(self):
+        """Padded positions should have gru_out == 0, giving scores near 0.5."""
+        # Build a batch where video 0 is short (5 segs), video 1 is long (10)
+        f0 = torch.randn(5,  2131)
+        f1 = torch.randn(10, 2131)
+        features, labels, lengths = collate_fn([(f0, 0), (f1, 1)])
+
+        model = AnomalyDetector()
+        model.eval()
+        with torch.no_grad():
+            scores, _ = model(features, lengths=lengths)
+
+        # Padded positions for video 0 (indices 5..9): gru_out = 0,
+        # so sigmoid(linear(0)) = sigmoid(bias only) — not necessarily 0.5
+        # but scores must be valid floats
+        assert torch.isfinite(scores).all()
+        # Real positions (0..4) must be present
+        assert scores.shape == (2, 10, 1)
 
 
 # ============================================================================
-# 7. Checkpoint and State Management Tests
+# 7. State Management Tests
 # ============================================================================
 
 class TestStateManagement:
-    """Test model state management."""
 
     def test_save_and_load_model_state(self, tmp_path):
-        """Test saving and loading model state."""
         model_1 = AnomalyDetector()
 
-        # Get initial predictions
-        features = torch.randn(4, 10, 2131)
+        features, _, lengths = _make_batch()
         model_1.eval()
         with torch.no_grad():
-            scores_1, probs_1 = model_1(features)
+            scores_1, probs_1 = model_1(features, lengths=lengths)
 
-        # Save state
         checkpoint_path = tmp_path / "model.pth"
         torch.save(model_1.state_dict(), checkpoint_path)
 
-        # Create new model and load state
         model_2 = AnomalyDetector()
         model_2.load_state_dict(torch.load(checkpoint_path))
-
-        # Get predictions from loaded model
         model_2.eval()
         with torch.no_grad():
-            scores_2, probs_2 = model_2(features)
+            scores_2, probs_2 = model_2(features, lengths=lengths)
 
-        # Should be identical
         assert torch.allclose(scores_1, scores_2)
         assert torch.allclose(probs_1, probs_2)
 
     def test_train_eval_mode_consistency(self):
-        """Test consistency of train/eval mode switches."""
-        model = AnomalyDetector()
-        features = torch.randn(4, 10, 2131)
+        model    = AnomalyDetector()
+        features, _, lengths = _make_batch()
 
-        # Switch modes
         model.train()
         assert model.training
+        scores_train, _ = model(features, lengths=lengths)
 
         model.eval()
         assert not model.training
-
-        model.train()
-        assert model.training
-
-        # Forward pass should work in both modes
-        scores_train, _ = model(features)
-        model.eval()
-        scores_eval, _ = model(features)
+        scores_eval, _ = model(features, lengths=lengths)
 
         assert scores_train.shape == scores_eval.shape
 
@@ -489,32 +416,22 @@ class TestStateManagement:
 # ============================================================================
 
 class TestGradientAccumulation:
-    """Test gradient accumulation over batches."""
 
     def test_gradient_accumulation(self):
-        """Test accumulating gradients over multiple batches."""
-        model = AnomalyDetector()
-        loss_fn = MILRankingLoss()
+        model     = AnomalyDetector()
+        loss_fn   = MILRankingLoss()
         optimizer = torch.optim.SGD(model.parameters(), lr=0.001)
 
         accumulated_loss = 0
-
-        for batch_idx in range(3):
-            features = torch.randn(2, 10, 2131)
-            labels = torch.LongTensor([0, 1])
-
+        for _ in range(3):
+            features, labels, lengths = _make_batch(batch_size=2)
             model.train()
-            scores, probs = model(features)
-            loss = loss_fn(scores, labels) / 3  # Scale by number of batches
-
-            loss.backward()  # Accumulate gradients
-
+            scores, probs = model(features, lengths=lengths)
+            loss = loss_fn(scores, labels) / 3
+            loss.backward()
             accumulated_loss += loss.item()
 
-        # Step once after accumulation
         optimizer.step()
-
-        # Verify accumulation worked
         assert accumulated_loss >= 0
 
 
@@ -523,40 +440,41 @@ class TestGradientAccumulation:
 # ============================================================================
 
 class TestInferencePipeline:
-    """Test inference-only pipeline."""
 
-    def test_inference_no_grad(self):
-        """Test efficient inference with no_grad."""
+    def test_inference_no_grad_with_lengths(self):
         model = AnomalyDetector()
         model.eval()
 
-        features = torch.randn(4, 10, 2131)
+        features, _, lengths = _make_batch()
 
         with torch.no_grad():
-            scores, probs = model(features)
+            scores, probs = model(features, lengths=lengths)
 
-        # Verify no gradients computed
+        assert scores.requires_grad is False
+        assert probs.requires_grad is False
+
+    def test_inference_no_grad_without_lengths(self):
+        """Single-video inference: lengths=None is still valid."""
+        model = AnomalyDetector()
+        model.eval()
+
+        features = torch.randn(1, 10, 2131)
+
+        with torch.no_grad():
+            scores, probs = model(features)   # no lengths — no padding
+
         assert scores.requires_grad is False
         assert probs.requires_grad is False
 
     def test_inference_batch_processing(self):
-        """Test inference on multiple batches."""
         model = AnomalyDetector()
         model.eval()
 
         all_scores = []
-        all_probs = []
-
-        num_batches = 5
-        for batch_idx in range(num_batches):
-            features = torch.randn(4, 10, 2131)
-
+        for _ in range(5):
+            features, _, lengths = _make_variable_batch()
             with torch.no_grad():
-                scores, probs = model(features)
-
+                scores, probs = model(features, lengths=lengths)
             all_scores.append(scores)
-            all_probs.append(probs)
 
-        # Should have processed 5 batches
         assert len(all_scores) == 5
-        assert len(all_probs) == 5

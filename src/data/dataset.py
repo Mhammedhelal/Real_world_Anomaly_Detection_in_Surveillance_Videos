@@ -5,6 +5,13 @@ Dataset classes and data loading utilities.
 
 Includes .npz validation at load time so corrupted or NaN-containing
 feature files are caught before they silently corrupt training gradients.
+
+collate_fn change
+-----------------
+Now returns a third element ``lengths`` (LongTensor [batch_size]) containing
+the real (unpadded) segment count for each video.  Pass it directly to
+AnomalyDetector.forward(x, lengths=lengths) so the BiGRU uses packing and
+never processes padding zeros.
 """
 
 import os
@@ -151,8 +158,27 @@ class VideoFeatureDataset(Dataset):
 
 
 def collate_fn(batch):
-    """Pad variable-length segment sequences to the longest in the batch."""
-    features, labels = zip(*batch)
-    features_padded = torch.nn.utils.rnn.pad_sequence(features, batch_first=True)
-    return features_padded, torch.LongTensor(labels)
+    """
+    Pad variable-length segment sequences to the longest in the batch
+    and return real lengths for GRU packing.
 
+    Parameters
+    ----------
+    batch : list of (features, label)
+        features : Tensor [num_segments, feature_dim]
+        label    : int
+
+    Returns
+    -------
+    features_padded : Tensor [batch_size, max_segments, feature_dim]
+        Shorter sequences are zero-padded to max_segments.
+    labels : LongTensor [batch_size]
+    lengths : LongTensor [batch_size]
+        Real (unpadded) segment count for each video.
+        Pass directly to AnomalyDetector.forward(x, lengths=lengths)
+        so the BiGRU skips padding zeros.
+    """
+    features, labels = zip(*batch)
+    lengths = torch.LongTensor([f.size(0) for f in features])
+    features_padded = torch.nn.utils.rnn.pad_sequence(features, batch_first=True)
+    return features_padded, torch.LongTensor(labels), lengths

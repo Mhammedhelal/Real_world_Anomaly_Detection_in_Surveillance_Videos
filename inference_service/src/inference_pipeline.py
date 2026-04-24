@@ -8,8 +8,8 @@ Architecture (parallel threads)
 
     ┌────────────────────────────────────────────────────────────┐
     │  Camera / RTSP source                                      │
-    │  _CameraThread  (I/O-bound, GIL released in cap.read())   │
-    │        ↓  List[np.ndarray]  — batch_size=segment_length   │
+    │  _CameraThread  (I/O-bound, GIL released in cap.read())    │
+    │        ↓  List[np.ndarray]  — batch_size=segment_length    │
     │  frame_queue  (bounded — drops oldest on overflow)         │
     │        ↓                                                   │
     │  _InferenceThread  (GPU compute)                           │
