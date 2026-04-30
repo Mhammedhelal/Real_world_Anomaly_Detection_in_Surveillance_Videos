@@ -75,8 +75,16 @@ class FeatureExtractionPipeline:
     def _load_progress(self) -> dict:
         if self._progress_file.exists():
             with open(self._progress_file) as f:
-                return json.load(f)
-        return {'processed': [], 'failed': [], 'start_time': datetime.now().isoformat()}
+                data = json.load(f)
+            # Migrate legacy progress files that predate last_checkpoint
+            data.setdefault('last_checkpoint', None)
+            return data
+        return {
+            'processed': [],
+            'failed': [],
+            'last_checkpoint': None,   # filename of the last video we *started*
+            'start_time': datetime.now().isoformat(),
+        }
 
     def _save_progress(self) -> None:
         with open(self._progress_file, 'w') as f:
@@ -116,6 +124,25 @@ class FeatureExtractionPipeline:
         force_reprocess: bool = False,
         max_videos: Optional[int] = None,
     ) -> Tuple[int, int]:
+        """
+        Extract features for every video provided by the DiskVideoSource.
+
+        Resume behaviour
+        ----------------
+        When ``resume=True`` (default) and ``force_reprocess=False``:
+
+        * Any video whose filename appears in ``progress['processed']`` is
+          skipped — it completed successfully in a prior run.
+        * Additionally, if the pipeline was interrupted mid-video, that video's
+          filename is stored in ``progress['last_checkpoint']``.  On the next
+          run the pipeline rewinds to that video and re-processes it from
+          scratch, because we cannot know whether its .npz was written cleanly.
+        * Videos that appear in ``progress['failed']`` are *retried* on every
+          resume so that transient errors (e.g. a locked GPU) are self-healing.
+
+        Pass ``force_reprocess=True`` (``--force`` on the CLI) to ignore all
+        prior progress and re-extract everything.
+        """
         if not isinstance(self.source, DiskVideoSource):
             raise TypeError(
                 "extract_all_features() requires DiskVideoSource. "
@@ -128,22 +155,47 @@ class FeatureExtractionPipeline:
 
         logger.info("Feature extraction: %d videos → %s", len(video_paths), self.features_dir)
 
+        # Build a fast lookup of already-completed filenames
+        completed: set[str] = {
+            item['filename'] for item in self._progress['processed']
+        }
+
+        # The last video we *started* before a crash — must be re-processed
+        # even if it somehow ended up in `completed` with stale data.
+        interrupted_filename: Optional[str] = self._progress.get('last_checkpoint')
+        if resume and interrupted_filename and not force_reprocess:
+            logger.info(
+                "Resuming from last checkpoint: %s  (will re-process to ensure integrity)",
+                interrupted_filename,
+            )
+            # Remove it from completed so it gets re-processed below
+            completed.discard(interrupted_filename)
+
         for video_path in video_paths:
             filename = video_path.name
-            already_done = any(
-                item['filename'] == filename for item in self._progress['processed']
-            )
-            if resume and already_done and not force_reprocess:
+
+            if not force_reprocess and resume and filename in completed:
                 logger.info("Skipping (already processed): %s", filename)
                 self._stats['successful'] += 1
                 continue
 
+            # --- Mark that we are *starting* this video before any work ---
+            # If the process is killed mid-extraction, the next resume will
+            # see this filename in last_checkpoint and re-process it.
+            self._progress['last_checkpoint'] = filename
+            self._save_progress()
+
             success = self._process_single_video(video_path)
             self._stats['total_videos'] += 1
+
             if success:
                 self._stats['successful'] += 1
+                # Clear the checkpoint only after a confirmed successful save
+                self._progress['last_checkpoint'] = None
+                self._save_progress()
             else:
                 self._stats['failed'] += 1
+                # Leave last_checkpoint set so the next resume retries this video
 
         self._print_summary()
         return self._stats['successful'], self._stats['failed']
@@ -257,10 +309,11 @@ class FeatureExtractionPipeline:
 
         logger.info(
             "Status [%s]: %d files  (%d train, %d test)  %.2f MB  "
-            "processed=%d  failed=%d",
+            "processed=%d  failed=%d  last_checkpoint=%s",
             self.features_dir,
             len(npz_files), len(train_files), len(test_files), total_mb,
             len(self._progress['processed']), len(self._progress['failed']),
+            self._progress.get('last_checkpoint') or 'none',
         )
 
 

@@ -9,6 +9,18 @@ Usage
     python scripts/extract_features.py --video-dir /data/UCF-Crime/Assault --split test
     python scripts/extract_features.py --video-folder normal --dry-run
     python scripts/extract_features.py --video-folder normal --save-dir my/custom/output
+
+Resume behaviour
+----------------
+By default the script resumes from where it left off:
+  • Videos already in extraction_progress.json → skipped.
+  • The video that was mid-processing when the pipeline last stopped
+    (tracked via ``last_checkpoint``) → re-processed from scratch to
+    guarantee a clean .npz.
+
+Pass --no-resume to start completely fresh (keeps existing .npz files
+on disk but ignores the progress log).
+Pass --force to re-extract every video regardless of prior progress.
 """
 
 from __future__ import annotations
@@ -72,10 +84,39 @@ def parse_args() -> argparse.Namespace:
                    help="Number of videos processed per batch")
     p.add_argument("--max-videos", type=int, default=None,
                    help="Stop after processing this many videos (useful for testing)")
-    p.add_argument("--resume", action="store_true", default=True,
-                   help="Skip videos that were already extracted (default: on)")
-    p.add_argument("--force", action="store_true",
-                   help="Re-extract even if the .npz file already exists")
+
+    # ── Resume control ─────────────────────────────────────────────────────────
+    resume_grp = p.add_mutually_exclusive_group()
+    resume_grp.add_argument(
+        "--resume",
+        dest="resume",
+        action="store_true",
+        default=True,
+        help=(
+            "Resume from the last checkpoint: skip videos that completed "
+            "successfully and re-process the one that was mid-extraction "
+            "when the pipeline last stopped. This is the default behaviour."
+        ),
+    )
+    resume_grp.add_argument(
+        "--no-resume",
+        dest="resume",
+        action="store_false",
+        help=(
+            "Ignore extraction_progress.json and process all videos from "
+            "the beginning.  Existing .npz files on disk are NOT deleted; "
+            "use --force to also re-extract those."
+        ),
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Re-extract every video even if its .npz already exists and it "
+            "appears in the progress log.  Implies --no-resume."
+        ),
+    )
+
     p.add_argument("--dry-run", action="store_true",
                    help="List what would be processed without extracting anything")
     p.add_argument("--yes", action="store_true",
@@ -87,6 +128,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    # --force implies ignoring prior progress entirely
+    if args.force:
+        args.resume = False
 
     setup_logging(log_dir=args.log_dir, run_name="extract_features")
     logger = get_logger(__name__)
@@ -111,7 +156,6 @@ def main() -> None:
 
     # ── Resolve output directories ─────────────────────────────────────────────
     if args.save_dir:
-        # User explicitly provided a save directory — use it directly.
         features_dir = Path(args.save_dir)
         metadata_dir = (
             Path(args.metadata_dir)
@@ -119,8 +163,6 @@ def main() -> None:
             else features_dir / "metadata"
         )
     else:
-        # Fall back to the config-derived path:
-        #   <output_base_dir>/<features_dir_name>/<folder_name>_<split>/
         features_base = Path(cfg.dataset.output_base_dir) / cfg.dataset.features_dir_name
         features_dir  = features_base / f"{folder_name}_{args.split}"
         metadata_dir  = (
@@ -133,6 +175,11 @@ def main() -> None:
     logger.info("FEATURES DIR : %s", features_dir)
     logger.info("METADATA DIR : %s", metadata_dir)
     logger.info("SPLIT        : %s", args.split)
+    logger.info(
+        "RESUME       : %s%s",
+        args.resume,
+        "  (--force overrides, will re-extract everything)" if args.force else "",
+    )
 
     # ── Dry run ────────────────────────────────────────────────────────────────
     if args.dry_run:
@@ -148,7 +195,10 @@ def main() -> None:
     if not args.yes:
         print(f"\n  Input  : {input_video_dir}")
         print(f"  Output : {features_dir}")
-        print(f"  Split  : {args.split}\n")
+        print(f"  Split  : {args.split}")
+        print(f"  Resume : {args.resume}")
+        if args.force:
+            print("  ⚠  --force: all videos will be re-extracted\n")
         resp = input("Proceed with extraction? (yes/no): ")
         if resp.strip().lower() != "yes":
             logger.info("Aborted.")
@@ -195,7 +245,7 @@ def main() -> None:
     )
 
     processed, failed = pipeline.extract_all_features(
-        resume=args.resume and not args.force,
+        resume=args.resume,
         force_reprocess=args.force,
         max_videos=args.max_videos,
     )
