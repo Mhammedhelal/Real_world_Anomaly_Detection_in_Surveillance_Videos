@@ -22,8 +22,8 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from torch.amp import GradScaler, autocast
-from torch.utils.data import DataLoader
+from torch.cuda.amp import GradScaler
+from torch.amp import autocast
 
 from src.config import Config
 from src.data.dataset import VideoFeatureDataset, collate_fn
@@ -166,7 +166,7 @@ class Trainer:
 
             self.optimizer.zero_grad(set_to_none=True)
 
-            with autocast(enabled=self._use_amp):
+            with autocast(device_type='cuda', enabled=self._use_amp):
                 # Pass lengths so the GRU packs and ignores padding zeros
                 anomaly_scores, class_logits = self.model(features, lengths=lengths)
 
