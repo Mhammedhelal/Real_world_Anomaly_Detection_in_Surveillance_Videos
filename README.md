@@ -58,7 +58,7 @@ User → [Web App] ──── REST/Base64 frames ────► [AI Service �
 
 > **Web developers:** refer to the companion repository for setup, UI, and authentication.
 
-- **Web Repository:** [Insert Web Repo Link Here](https://github.com/your-org/your-web-repo)
+- **Web Repository:** [Surveillance Cameras Management System](https://github.com/Moaiad911/Surveillance-Cameras)
 
 ### Integration Point
 
