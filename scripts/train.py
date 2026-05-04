@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--features-dir", required=True,
                    help="Directory with train_*.npz feature files")
-    p.add_argument("--save-dir", default="./checkpoints",
+    p.add_argument("--save-dir", default="./outputs/checkpoints",
                    help="Directory for model checkpoints")
     p.add_argument("--config", default=None,
                    help="Path to YAML config file")
