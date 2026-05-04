@@ -72,6 +72,7 @@ class Trainer:
         self.device = torch.device(device)
 
         self.model = model.to(self.device)
+        for param in self.model.parameters(): param.requires_grad = True
         self.train_loader = train_loader
 
         self.num_epochs: int    = config.training.num_epochs
@@ -263,6 +264,7 @@ class Trainer:
     def load_checkpoint(self, checkpoint_path: str | Path) -> int:
         ckpt = load_checkpoint(checkpoint_path, device=self.device)
         self.model.load_state_dict(ckpt["model_state_dict"])
+        for param in self.model.parameters(): param.requires_grad = True
         self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         if "scaler_state_dict" in ckpt:
             self._scaler.load_state_dict(ckpt["scaler_state_dict"])
