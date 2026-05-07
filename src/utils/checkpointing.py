@@ -136,11 +136,10 @@ def load_model_from_checkpoint(
 
     ckpt = load_checkpoint(checkpoint_path, device=device)
 
-    cfg = ckpt.get("config", {})
     model = AnomalyDetector(
-        input_size=cfg.get("input_size", 2131),
-        hidden_size=cfg.get("hidden_size", 256),
-        num_classes=cfg.get("num_classes", 14),
+        input_size=ckpt.get("input_size", 595),
+        hidden_size=ckpt.get("hidden_size", 256),
+        num_classes=ckpt.get("num_classes", 14),
     ).to(device)
 
     model.load_state_dict(ckpt["model_state_dict"])

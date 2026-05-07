@@ -251,11 +251,10 @@ class Trainer:
                 "loss":                 self.loss_history[-1] if self.loss_history else 0.0,
                 "loss_history":         self.loss_history,
                 "best_loss":            self.best_loss,
-                "config": {
-                    "input_size":  self.config.model.input_size,
-                    "hidden_size": self.config.model.hidden_size,
-                    "num_classes": self.config.model.num_classes,
-                },
+                "input_size":  self.model.input_size,
+                "hidden_size": self.model.hidden_size,
+                "num_classes": self.model.num_classes,
+
             },
             path,
         )

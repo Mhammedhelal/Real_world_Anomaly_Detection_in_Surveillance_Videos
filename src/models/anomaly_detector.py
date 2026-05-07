@@ -41,17 +41,20 @@ class AnomalyDetector(nn.Module):
         num_classes: int = 14,
     ):
         super().__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.num_classes = num_classes
 
         # 1. Temporal Encoder: processes fused I3D (2048) + YOLO (83) features
         self.bigru = nn.GRU(
-            input_size=input_size,
-            hidden_size=hidden_size,
+            input_size=self.input_size ,
+            hidden_size=self.hidden_size,
             num_layers=1,
             batch_first=True,
             bidirectional=True,
         )
 
-        combined_dim = hidden_size * 2  # bidirectional concatenation
+        combined_dim = self.hidden_size * 2  # bidirectional concatenation
 
         # 2. MIL Ranking Head: anomaly score in [0, 1] per segment
         self.anomaly_head = nn.Sequential(
@@ -61,7 +64,7 @@ class AnomalyDetector(nn.Module):
 
         # 3. Multi-Class Classification Head: fine-grained crime category
         self.class_head = nn.Sequential(
-            nn.Linear(combined_dim, num_classes),
+            nn.Linear(combined_dim, self.num_classes),
             nn.Softmax(dim=-1),
         )
 
