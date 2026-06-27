@@ -1,7 +1,7 @@
 # 🎯 Real-World Anomaly Detection in Surveillance Videos — AI Service
 
 > **Production-grade ML microservice** for real-time crime detection in surveillance footage.  
-> Bi-GRU + Two-Stream feature fusion (I3D + YOLOv8) · FastAPI · PyTorch · Docker-ready
+> Bi-GRU + Two-Stream feature fusion (R3D + YOLOv8) · FastAPI · PyTorch · Docker-ready
 
 
 ---
@@ -10,7 +10,7 @@
 
 | Feature | Detail |
 |---|---|
-| **Two-Stream Fusion** | I3D (motion) + YOLOv8 (objects) → 2131-dim feature vector |
+| **Two-Stream Fusion** | R3D (motion) + YOLOv8 (objects) → 595-dim feature vector |
 | **Spatial Localisation** | YOLO bounding boxes attributed with per-object anomaly scores |
 | **Packed-Sequence GRU** | Variable-length video handling with zero padding corruption |
 | **Production Architecture** | Parallel camera + inference threads, bounded queues, hot-reload threshold |
@@ -27,7 +27,7 @@ User → [Web App] ──── REST/Base64 frames ────► [AI Service �
                                                         │
                                           ┌─────────────▼─────────────┐
                                           │  VideoPreprocessor         │
-                                          │  I3D  +  YOLOv8  Fusion   │
+                                          │  R3D  +  YOLOv8  Fusion   │
                                           │  Bi-GRU AnomalyDetector   │
                                           │  SpatialLocalizer (YOLO)  │
                                           └─────────────┬─────────────┘
@@ -115,11 +115,11 @@ Input: [Batch, Segments, 595]   # R3D (512) + YOLO (83) due to memory constraint
                  per-segment score                    UCF-Crime category
 ```
 
-> **Note:** Our final model uses **595-dim features (R3D 512 + YOLO 83)** due to Colab RAM constraints. The full I3D+YOLO (2131-dim) configuration is expected to achieve 75–82% accuracy.
+> **Note:** Our model uses **595-dim features (R3D 512 + YOLO 83)**.
 
 **Training objective:** MIL Ranking Loss + temporal smoothness + sparsity regularisation
 
-**13 crime categories + Normal:**  Abuse, Arrest, Arson, Assault, Burglary, Explosion, Fighting, Robbery, Shooting, Shoplifting, Stealing, Vandalism, Road Accidents
+**13 crime categories + Normal:** Abuse, Arrest, Arson, Assault, Burglary, Explosion, Fighting, Robbery, Shooting, Shoplifting, Stealing, Vandalism, Road Accidents
 
 ---
 
@@ -275,7 +275,7 @@ All parameters are environment-variable driven for Docker/Kubernetes deployment:
 ├── src/
 │   ├── models/
 │   │   ├── anomaly_detector.py   # Bi-GRU with packed-sequence support
-│   │   ├── feature_extractors.py # I3D, R3D, Lightweight, YOLO, Two-Stream
+│   │   ├── feature_extractors.py # R3D, Lightweight, YOLO, Two-Stream
 │   │   ├── losses.py             # MIL Ranking Loss
 │   │   └── video_preprocessor.py
 │   ├── data/
@@ -347,7 +347,7 @@ pytest tests/ -n 4
 
 ## 🚧 Limitations
 
-- **Feature Dimension:** Using 595-dim (R3D+YOLO) instead of 2131-dim (I3D+YOLO) due to RAM constraints on Colab Free tier
+- **Feature Dimension:** Using 595-dim (R3D+YOLO) due to RAM constraints on Colab Free tier
 - **Test Set Size:** Only 82 videos; some anomaly classes have 2–3 samples, limiting per-class reliability
 - **GPU Dependency:** Real-time inference requires GPU; CPU inference is slower (~2–3 seconds per request)
 - **Spatial Localisation:** Bounding boxes are heuristic attributions, not pixel-perfect ground truth
@@ -361,14 +361,14 @@ pytest tests/ -n 4
 - [ ] Multi-GPU inference with TorchServe or Triton
 - [ ] Streaming video input (RTSP) via `CameraStreamSource` — pipeline already implemented
 - [ ] Grad-CAM temporal attention visualisation for model explainability
-- [ ] Full I3D+YOLO (2131-dim) feature extraction with sufficient hardware resources
+- [ ] Full R3D+YOLO pipeline upgrade with larger feature dimensions on better hardware
 
 ---
 
 ## 📚 References
 
 - Sultani, W., Chen, C., & Shah, M. (2018). *Real-world Anomaly Detection in Surveillance Videos.* CVPR. [arXiv:1801.04264](https://arxiv.org/abs/1801.04264)
-- Carreira, J., & Zisserman, A. (2017). *Quo Vadis, Action Recognition? A New Model and the Kinetics Dataset.* CVPR.
+- Tran, D. et al. (2018). *A Closer Look at Spatiotemporal Convolutions for Action Recognition (R3D).* CVPR.
 - Jocher, G. et al. (2023). *YOLOv8.* [Ultralytics](https://github.com/ultralytics/ultralytics)
 
 ---
